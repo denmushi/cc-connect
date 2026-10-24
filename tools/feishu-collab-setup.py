@@ -2,14 +2,15 @@
 """飞书群协作机器人一键配置（cc-connect 群协作模式，说明见 docs/feishu-collab.md）。
 
 在仓库根目录运行：
-  python3 tools/feishu-collab-setup.py                        # 扫码新建机器人
-  python3 tools/feishu-collab-setup.py --app cli_xxx:密钥     # 绑定已有机器人
+  python3 tools/feishu-collab-setup.py                        # 会问有没有现成的机器人：没有就扫码新建，有就填凭证绑定
+  python3 tools/feishu-collab-setup.py --app cli_xxx:密钥     # 直接绑定已有机器人，不问
 
 依次做：编译本仓库的 cc-connect → 生成配置 → 建机器人 → 检查权限和名字 → 选讨论群 → 装后台服务。
 可以重复运行：已有的配置和机器人会沿用，只补没做完的步骤；git pull 之后重跑就是更新。
 """
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -218,6 +219,27 @@ def write_config(cfg_path, home, work_dir):
     os.chmod(str(cfg_path), 0o600)  # 之后会写进机器人密钥
 
 
+def choose_app(given):
+    """问用户有没有现成的机器人：有就返回 app_id:app_secret 用来绑定，没有返回空串、走扫码新建。"""
+    if given:
+        return given
+    if not confirm("已经有现成的飞书机器人吗？没有就扫码新建一个", default=False):
+        return ""
+    say("App ID 和 App Secret 在开发者后台应用的「凭证与基础信息」里：%s/app" % OPEN_API)
+    say("现成的机器人要先在「事件与回调」里选长连接，订阅事件 im.message.receive_v1 和回调 card.action.trigger；"
+        "也不能同时给别的程序用，否则消息会被分走")
+    while True:
+        app_id = ask("App ID（cli_ 开头）")
+        if app_id.startswith("cli_"):
+            break
+        say("App ID 是 cli_ 开头的那串")
+    prompt = "App Secret（输入时不显示）："
+    secret = getpass.getpass(prompt) if sys.stdin.isatty() else ask(prompt.rstrip("："))
+    if not secret.strip():
+        fail("没填 App Secret")
+    return "%s:%s" % (app_id, secret.strip())
+
+
 def setup_bot(bin_path, cfg_path, app):
     cmd = [str(bin_path), "feishu", "setup", "--config", str(cfg_path), "--project", PROJECT]
     if app:
@@ -353,7 +375,7 @@ def main():
     ap = argparse.ArgumentParser(description="飞书群协作机器人一键配置，说明见 docs/feishu-collab.md")
     ap.add_argument("--home", default="~/.cc-connect-collab", help="程序、配置、日志放在哪（默认 ~/.cc-connect-collab）")
     ap.add_argument("--work-dir", help="Agent 读哪个目录的代码（第一次生成配置时用）")
-    ap.add_argument("--app", help="绑定已有机器人：app_id:app_secret（不填就扫码新建）")
+    ap.add_argument("--app", help="直接绑定已有机器人：app_id:app_secret（不填会问你有没有现成的）")
     ap.add_argument("--skip-build", action="store_true", help="已经编译过时跳过编译")
     ap.add_argument("--no-service", action="store_true", help="不装后台服务，只打印前台启动命令")
     args = ap.parse_args()
@@ -384,7 +406,7 @@ def main():
     if app_id and not args.app:
         say("沿用已配置的机器人 %s" % app_id)
     else:
-        setup_bot(bin_path, cfg_path, args.app)
+        setup_bot(bin_path, cfg_path, choose_app(args.app))
     app_id, app_secret = read_option(cfg_path, "app_id"), read_option(cfg_path, "app_secret")
     if not app_id or not app_secret:
         fail("配置里没找到机器人的 app_id 和 app_secret，建机器人那一步可能没成功")
