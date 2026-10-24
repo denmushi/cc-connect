@@ -40,6 +40,28 @@
 </p>
 
 
+## 💬 本分支新增：飞书群协作
+
+每个人把自己电脑上的 Claude Code 接成一个飞书机器人，拉进同一个群。@ 哪个机器人，它就先读完群里之前的讨论再回答；需要别人的意见时，它会 @ 那个人和他的机器人，对方的机器人接着读、接着答。原版 cc-connect 没有这个功能，要用本仓库编译的版本。
+
+**快速上手**（macOS 或 Linux；需要 Go 1.25 以上、已登录的 Claude Code 命令行、飞书手机 App）：
+
+```bash
+git clone https://github.com/denmushi/cc-connect.git
+cd cc-connect
+python3 tools/feishu-collab-setup.py
+```
+
+脚本会一步步带你：编译 → 生成配置 → 扫码建机器人（已有机器人也可以直接绑定）→ 检查权限和名字 → 选讨论群 → 装成后台服务。装好后在群里：
+
+1. `@你的机器人 /role 一句话说明它负责什么`：登记定位，别的机器人才认得它
+2. （可选）`@你的机器人 /list`，再 `@你的机器人 /fork 序号`：接上你在终端里用 Claude Code 聊过的会话
+3. `@任意机器人 你的问题`：开始讨论
+
+默认只读（不改文件、不跑命令），命令和审批只认机器人的主人。完整说明、默认权限和常见问题见 [docs/feishu-collab.md](docs/feishu-collab.md)。
+
+> 以下是上游 cc-connect 的原始介绍。
+
 ## ❤️ 赞助
 
 > 想在这里展示？联系：chg80333@gmail.com | 微信：mongorz
