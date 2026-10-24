@@ -3584,6 +3584,11 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string, interactiveKey string) bool {
+	if msg.CannotApprove {
+		// Leave any pending prompt for someone allowed to answer it; the
+		// message itself goes through the normal (queued) path.
+		return false
+	}
 	iKey := interactiveKey
 	if iKey == "" {
 		iKey = e.interactiveKeyForSessionKey(msg.SessionKey)
@@ -4119,7 +4124,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent := e.buildSenderPrompt(withAgentContext(p, msg.ReplyCtx, session, msg.Content), msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -4320,6 +4325,36 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	existing.mu.Unlock()
 }
 
+// startOrForkAgentSession resumes startSessionID, or forks it when the session
+// was bound with /fork and the agent supports forking.
+func (e *Engine) startOrForkAgentSession(agent Agent, session *Session, startSessionID string) (AgentSession, error) {
+	if startSessionID != "" && session.IsForkPending() {
+		if forker, ok := agent.(SessionForker); ok {
+			slog.Info("forking agent session", "source_session_id", startSessionID)
+			return forker.StartForkedSession(e.ctx, startSessionID)
+		}
+	}
+	return agent.StartSession(e.ctx, startSessionID)
+}
+
+// withAgentContext puts platform-provided context (AgentContextProvider) in
+// front of a prompt right before it is sent, so it reflects the conversation
+// the agent is actually in, even for messages that waited in the queue.
+func withAgentContext(p Platform, replyCtx any, session *Session, content string) string {
+	cp, ok := p.(AgentContextProvider)
+	if !ok || session == nil {
+		return content
+	}
+	extra := cp.AgentContext(replyCtx, session.ID)
+	if extra == "" {
+		return content
+	}
+	if strings.TrimSpace(content) == "" {
+		return extra
+	}
+	return extra + "\n" + content
+}
+
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
@@ -4461,7 +4496,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := e.startOrForkAgentSession(agent, session, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -6968,7 +7003,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+		prompt := e.buildSenderPrompt(withAgentContext(queued.platform, queued.replyCtx, session, queued.content), queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		state.mu.Lock()
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
@@ -7015,6 +7050,7 @@ var builtinCommands = []struct {
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
+	{[]string{"fork"}, "fork"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
@@ -7217,6 +7253,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdList(p, msg, args)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
+	case "fork":
+		e.cmdFork(p, msg, args)
 	case "name":
 		e.cmdName(p, msg, args)
 	case "current":
@@ -7814,6 +7852,52 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+}
+
+// cmdFork binds the chat to a copy of an existing agent session: the next turn
+// forks it (agent SessionForker), so the source transcript, possibly still in
+// use from a terminal, is never written by this chat.
+func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /fork <number | id_prefix | name>")
+		return
+	}
+	query := strings.TrimSpace(strings.Join(args, " "))
+
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	if _, ok := agent.(SessionForker); !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgForkUnsupported))
+		return
+	}
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+	matched := e.matchSession(agentSessions, sessions, query)
+	if matched == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
+		return
+	}
+
+	slog.Info("cmdFork: forking agent session", "session_key", msg.SessionKey, "source_session_id", matched.ID)
+	e.cleanupInteractiveState(interactiveKey)
+	sessions.ForkFromAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+
+	shortID := matched.ID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	displayName := sessions.GetSessionName(matched.ID)
+	if displayName == "" {
+		displayName = matched.Summary
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgForkSuccess, displayName, shortID, matched.MessageCount))
 }
 
 // matchSession resolves a user query to an agent session. Priority:

@@ -56,6 +56,11 @@ type Session struct {
 	// sessions cannot permanently occupy the active slot.
 	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
 
+	// ForkPending marks a session bound with /fork: the next agent start forks
+	// AgentSessionID instead of resuming it in place. It clears itself as soon
+	// as the agent session ID changes (the fork reports its new ID).
+	ForkPending bool `json:"fork_pending,omitempty"`
+
 	mu        sync.Mutex `json:"-"`
 	busy      bool       `json:"-"`
 	busySince time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
@@ -195,10 +200,18 @@ func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != agentSessionID {
 		s.recordPastAgentSessionID()
+		s.ForkPending = false
 	}
 	s.AgentSessionID = agentSessionID
 	s.AgentType = agentType
 	s.Name = name
+}
+
+// IsForkPending reports whether the next agent start should fork AgentSessionID.
+func (s *Session) IsForkPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ForkPending
 }
 
 // GetAgentSessionID atomically reads the agent session ID.
@@ -302,6 +315,7 @@ func (s *Session) SetAgentSessionID(id, agentType string) {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != id {
 		s.recordPastAgentSessionID()
+		s.ForkPending = false
 	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
@@ -526,6 +540,24 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 
 	s := sm.createLocked(userKey, summary)
 	s.SetAgentInfo(agentSID, agentName, summary)
+	s.MarkExplicitlyActivated()
+	sm.saveLocked()
+	return s
+}
+
+// ForkFromAgentSession creates a new active session bound to a copy of
+// agentSID: the next agent start forks it (see Session.ForkPending), leaving
+// the source conversation untouched. Unlike SwitchToAgentSession it never
+// reuses an existing session, so every /fork starts a fresh conversation.
+func (sm *SessionManager) ForkFromAgentSession(userKey, agentSID, agentName, summary string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	s := sm.createLocked(userKey, summary)
+	s.SetAgentInfo(agentSID, agentName, summary)
+	s.mu.Lock()
+	s.ForkPending = true
+	s.mu.Unlock()
 	s.MarkExplicitlyActivated()
 	sm.saveLocked()
 	return s

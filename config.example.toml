@@ -1105,6 +1105,22 @@ app_secret = "your-feishu-app-secret"
 #                           # 机器人间 @通知映射表：friendly_name -> open_id。
 #                           # 当 @name 不是群成员（例如另一个机器人 / Agent，只能用 open_id 标识）时使用。
 #                           # 优先级高于 resolve_mentions 的群成员匹配；需同时开启 resolve_mentions = true。
+# collab = false            # Group collaboration: when @-mentioned (by people or other bots), read every group
+#                           # message since the last turn, reply as a Markdown card, and hand off by @-mentioning
+#                           # people and their bots inside the card. Members introduce their bot with "@bot /role ...".
+#                           # Needs scopes im:message.group_msg, im:message:readonly, im:chat.members:read and
+#                           # im:message.group_at_msg.include_bot:readonly. Pair with share_session_in_channel = true.
+#                           # 群协作模式：被 @ 时读取上次之后的全部群消息，用 Markdown 卡片回复，并在卡片里 @ 人和他的机器人来交接；
+#                           # 主人用「@机器人 /role 定位」在群里登记。需要上面四个权限，建议同时开 share_session_in_channel。
+# collab_initial_history = 200  # Messages read on the first turn in a chat / 第一次被 @ 时读取的最近消息条数
+# collab_max_bot_turns = 6      # Max consecutive bot messages without a human; the last one asks a human instead
+#                               # 没人说话时机器人最多连续发言次数，到上限后改为 @ 提问的人拍板
+# collab_owner = "ou_xxx"       # The bot's owner (open_id). In collab mode only the owner may run commands (/list,
+#                               # /fork, /role, "!" ...) or answer permission prompts and questions, in groups and
+#                               # private chats; others can only talk. Default: the app owner from the application
+#                               # API (needs application:application:self_manage, which QR-created apps have).
+#                               # 机器人主人的 open_id。群协作模式下只有主人能用命令、点审批，群聊私聊都一样，其他人只能对话；
+#                               # 不填时自动取应用所有者（扫码创建的应用自带所需权限）。
 # image_batch_window_ms = 500  # Coalesce window for consecutive images from the same session (default: 500ms).
 #                              # When the Feishu mobile client sends multiple images, each arrives as a separate
 #                              # event; cc-connect buffers them and dispatches a single multi-image message once

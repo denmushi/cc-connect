@@ -113,6 +113,12 @@ type replyContext struct {
 	bootstrapThread  bool
 	receiptEmoji     string // persistent reaction owned by the accepted-message callback
 	receiptMessageID string
+	// Group collaboration mode (see collab.go): replies render as Markdown
+	// cards with @mentions, guarded by the bot-to-bot loop limit.
+	collab          bool
+	collabBotTurns  int    // consecutive bot messages before this reply
+	collabAskerID   string // last human speaker, asked to decide at the loop limit
+	collabTriggerMs int64  // create time of the message that mentioned the bot
 }
 
 type Platform struct {
@@ -161,6 +167,7 @@ type Platform struct {
 	groupFilterRetryStop   chan struct{}
 	peerBots               map[string]string // app_id -> friendly alias, for quoted-reply attribution
 	mentionMap             map[string]string // agent name -> open_id (for outbound @ resolution)
+	collab                 *collabRuntime    // group collaboration mode; nil when disabled
 	userNameCache          sync.Map          // open_id -> display name
 	chatNameCache          sync.Map          // chat_id -> chat name
 	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
@@ -490,6 +497,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
 		groupChatHistoryShare:      groupChatHistoryShare,
+		collab:                     newCollabRuntime(opts),
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -809,6 +817,17 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if userID == "" || !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
 		return nil, nil
+	}
+	// Group collaboration: only the bot's owner may press its buttons
+	// (permission prompts, questions, session lists, settings).
+	if p.collab != nil {
+		ownerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		isOwner := p.collabIsOwner(ownerCtx, userID)
+		cancel()
+		if !isOwner {
+			slog.Info(p.tag()+": collab card action from non-owner ignored", "user", userID)
+			return nil, nil
+		}
 	}
 
 	chatID := ""
@@ -1219,6 +1238,9 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 	p.populateWorkspaceChannelKeys(msg)
 	if p.isMessageRecalled(msg.MessageID) {
 		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
+		return
+	}
+	if p.collab != nil && p.collabRestrict(msg) {
 		return
 	}
 	p.prepareReceiptAcknowledgement(msg)
@@ -1880,6 +1902,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	rctx.bootstrapThread = p.markThreadSessionActive(sessionKey)
 	if rctx.bootstrapThread && parentID == "" {
 		parentID = stringValue(msg.RootId)
+	}
+
+	// Group collaboration mode reads the group history itself (collab.go).
+	if p.collab != nil && chatType == "group" {
+		go p.collabDispatch(ctx, msgType, content, mentions, messageID, sessionKey, userID, senderType, chatID, rctx, createTimeMs)
+		return nil
 	}
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
@@ -3340,6 +3368,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	if p.collab != nil && rc.collab {
+		return p.collabSend(ctx, rc, content)
+	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
@@ -3362,6 +3393,9 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
 	}
+	if p.collab != nil && rc.collab {
+		return p.collabSend(ctx, rc, content)
+	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
@@ -3378,6 +3412,12 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if p.collab != nil && rc.collab {
+		if strings.TrimSpace(footer) != "" {
+			content += "\n\n" + footer
+		}
+		return p.collabSend(ctx, rc, content)
 	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)

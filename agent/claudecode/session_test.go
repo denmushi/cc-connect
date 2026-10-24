@@ -1126,10 +1126,11 @@ func TestNewClaudeSession_NoReplayFlagKeepsProcessAlive(t *testing.T) {
 		"",                                   // platformPrompt
 		false,                                // disableVerbose
 		spawnOpts,
-		0,  // maxContextTokens
-		0,  // ctxWindowTokens
-		"", // ccDataDir (lets ensureSharedSystemPromptFile fall back to TempDir)
-		"", // lang
+		0,     // maxContextTokens
+		0,     // ctxWindowTokens
+		"",    // ccDataDir (lets ensureSharedSystemPromptFile fall back to TempDir)
+		"",    // lang
+		false, // forkSession
 	)
 	if err != nil {
 		t.Fatalf("newClaudeSession: %v", err)

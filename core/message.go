@@ -428,6 +428,10 @@ type Message struct {
 	ReplyCtx         any    // platform-specific context needed for replying
 	FromVoice        bool   // true if message originated from voice transcription
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
+	// CannotApprove marks a sender who may talk to the agent but must not
+	// answer its permission prompts or questions (e.g. anyone but the bot's
+	// owner). Such a message never resolves a pending prompt or question.
+	CannotApprove bool
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,

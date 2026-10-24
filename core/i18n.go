@@ -546,6 +546,8 @@ const (
 	MsgSwitchSuccess   MsgKey = "switch_success"
 	MsgSwitchNoMatch   MsgKey = "switch_no_match"
 	MsgSwitchNoSession MsgKey = "switch_no_session"
+	MsgForkSuccess     MsgKey = "fork_success"
+	MsgForkUnsupported MsgKey = "fork_unsupported"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
@@ -593,6 +595,7 @@ const (
 	MsgBuiltinCmdList      MsgKey = "list"
 	MsgBuiltinCmdSearch    MsgKey = "search"
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
+	MsgBuiltinCmdFork      MsgKey = "fork"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
 	MsgBuiltinCmdName      MsgKey = "name"
 	MsgBuiltinCmdCurrent   MsgKey = "current"
@@ -3285,6 +3288,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
 		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
 	},
+	MsgForkSuccess: {
+		LangEnglish:            "✅ Bound to a copy of: %s (%s, %d msgs). The original session stays untouched.",
+		LangChinese:            "✅ 已绑定会话副本：%s（%s，%d 条消息），原会话不受影响",
+		LangTraditionalChinese: "✅ 已綁定會話副本：%s（%s，%d 則訊息），原會話不受影響",
+		LangJapanese:           "✅ セッションのコピーに接続しました：%s（%s、%d件）。元のセッションは変更されません",
+		LangSpanish:            "✅ Vinculado a una copia de: %s (%s, %d mensajes). La sesión original no cambia.",
+	},
+	MsgForkUnsupported: {
+		LangEnglish:            "❌ This agent cannot fork sessions; use /switch to resume a session directly.",
+		LangChinese:            "❌ 当前 Agent 不支持分叉会话，可以用 /switch 直接接上原会话",
+		LangTraditionalChinese: "❌ 目前的 Agent 不支援分叉會話，可以用 /switch 直接接上原會話",
+		LangJapanese:           "❌ このエージェントはセッションのフォークに対応していません。/switch で元のセッションを再開できます",
+		LangSpanish:            "❌ Este agente no puede bifurcar sesiones; usa /switch para reanudar la sesión directamente.",
+	},
 	MsgSwitchNoMatch: {
 		LangEnglish:            "❌ No session matching %q",
 		LangChinese:            "❌ 没有找到匹配 %q 的会话",
@@ -3674,6 +3691,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "按列表序號切換會話，參數: <序號>",
 		LangJapanese:           "リスト番号でセッションを切り替え、引数: <番号>",
 		LangSpanish:            "Reanudar sesión por su número en la lista, arg: <número>",
+	},
+	MsgBuiltinCmdFork: {
+		LangEnglish:            "Continue a copy of a session by its list number (original untouched), arg: <number>",
+		LangChinese:            "按列表序号分叉一份会话副本接着用（原会话不受影响），参数: <序号>",
+		LangTraditionalChinese: "按列表序號分叉一份會話副本接著用（原會話不受影響），參數: <序號>",
+		LangJapanese:           "リスト番号のセッションをコピーして続ける（元は変更されない）、引数: <番号>",
+		LangSpanish:            "Continuar una copia de la sesión por su número (la original no cambia), arg: <número>",
 	},
 	MsgBuiltinCmdDelete: {
 		LangEnglish:            "Delete session(s) by list number, args: <number> | 1,2,3 | 3-7 | 1,3-5,8",

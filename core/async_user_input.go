@@ -35,6 +35,10 @@ func (e *Engine) showAsyncUserInput(state *interactiveState, p Platform, replyCt
 func (e *Engine) handleAsyncUserInput(p Platform, msg *Message, content, key string, sessions *SessionManager) (string, bool) {
 	parts := strings.Split(content, ":")
 	callback := len(parts) == 4 && parts[0] == "askq"
+	if msg.CannotApprove {
+		// Not an answer: text goes on as normal input, option clicks are dropped.
+		return content, callback
+	}
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[key]
 	e.interactiveMu.Unlock()

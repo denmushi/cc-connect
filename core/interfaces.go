@@ -219,6 +219,23 @@ type SessionIDValidator interface {
 	ValidateSessionID(ctx context.Context, sessionID string) bool
 }
 
+// SessionForker is an optional Agent capability used by /fork: it continues
+// an existing conversation under a new session ID, so the source transcript
+// (e.g. a session the user still works in from a terminal) is never written.
+type SessionForker interface {
+	StartForkedSession(ctx context.Context, sourceID string) (AgentSession, error)
+}
+
+// AgentContextProvider is an optional Platform capability. Right before a
+// message is sent to the agent, the platform may return context to put in
+// front of it (e.g. group messages posted since the agent's last turn).
+// conversationID names the conversation the agent is in; it changes whenever
+// the session is switched, reset, rotated or re-bound, so the platform can
+// catch the new conversation up from scratch.
+type AgentContextProvider interface {
+	AgentContext(replyCtx any, conversationID string) string
+}
+
 // TypingIndicator is an optional interface for platforms that can show a
 // "processing" indicator (typing bubble, emoji reaction, etc.) while the
 // agent is working. StartTyping is called when processing begins and returns
