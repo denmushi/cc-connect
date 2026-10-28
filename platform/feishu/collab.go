@@ -42,6 +42,7 @@ const (
 
 // collabRuntime holds collab settings and per-chat state for one platform.
 type collabRuntime struct {
+	createOnly     bool
 	initialHistory int
 	maxBotTurns    int
 	stateDir       string // empty = keep state in memory only
@@ -105,6 +106,7 @@ func newCollabRuntime(opts map[string]any) *collabRuntime {
 		chatLocks:      make(map[string]*sync.Mutex),
 	}
 	c.ownerID, _ = opts["collab_owner"].(string)
+	c.createOnly, _ = opts["collab_create_only"].(bool)
 	if dataDir, _ := opts["cc_data_dir"].(string); dataDir != "" {
 		project, _ := opts["cc_project"].(string)
 		if project == "" {
@@ -301,7 +303,11 @@ func (p *Platform) collabRestrict(msg *core.Message) bool {
 		return false
 	}
 	slog.Info(p.tag()+": collab command from non-owner rejected", "session", msg.SessionKey, "user", msg.UserID)
-	if err := p.Reply(ctx, msg.ReplyCtx, collabOwnerOnlyNotice); err != nil {
+	notice := collabOwnerOnlyNotice
+	if p.collab.createOnly {
+		notice = "⛔ 只有我的主人能使用 /codex-create、/cc-create 创建会话；其他事情可以直接用自然语言和我交流。"
+	}
+	if err := p.Reply(ctx, msg.ReplyCtx, notice); err != nil {
 		slog.Warn(p.tag()+": collab owner-only notice failed", "error", err)
 	}
 	return true
@@ -653,6 +659,14 @@ func (p *Platform) collabContextFor(ctx context.Context, rc replyContext, conver
 			humanNames[id] = name
 		}
 	}
+	p.collabDiscoverBots(rc.chatID, st)
+	if st.Owner == "" {
+		ownerID := p.collabOwnerID(ctx)
+		st.Owner = humanNames[ownerID]
+		if st.Owner == "" {
+			st.Owner = ownerID
+		}
+	}
 	lines := collabScan(st, msgs, rc.messageID, p.getBotOpenID(), p.appID, incremental, humanNames)
 	if rc.collabTriggerMs > st.WatermarkMs {
 		st.WatermarkMs = rc.collabTriggerMs
@@ -756,7 +770,7 @@ func collabContext(selfName, chatName string, st *collabChatState, lines []strin
 	}
 	role := st.Role
 	if role == "" {
-		role = "未设置（主人可以发 /role 设置）"
+		role = "按群内自然语言和当前会话确定"
 	}
 	fmt.Fprintf(&b, "[群协作] 你是%s里的 AI 助手「%s」，主人：%s，定位：%s。\n", group, selfName, owner, role)
 
@@ -769,7 +783,7 @@ func collabContext(selfName, chatName string, st *collabChatState, lines []strin
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 	b.WriteString("群里登记过的其他 AI 助手：\n")
 	if len(peers) == 0 {
-		b.WriteString("- （暂无，其他助手的主人发 /role 后才会出现）\n")
+		b.WriteString("- （暂无已识别的其他助手）\n")
 	}
 	for _, e := range peers {
 		fmt.Fprintf(&b, "- %s（主人：%s；定位：%s）\n", e.Name, e.Owner, e.Role)
@@ -889,7 +903,7 @@ func (p *Platform) collabDispatch(ctx context.Context, msgType, content string, 
 	trimmed := strings.TrimSpace(text)
 
 	// Other commands are checked in dispatchCoreMessage (collabRestrict).
-	if role, ok := strings.CutPrefix(trimmed, "/role"); ok {
+	if role, ok := strings.CutPrefix(trimmed, "/role"); ok && !p.collab.createOnly {
 		if p.collabIsOwner(ctx, userID) {
 			p.collabHandleRole(ctx, chatID, userID, strings.TrimSpace(role), rctx)
 		} else {
@@ -940,7 +954,33 @@ const collabMembersTTL = 10 * time.Minute
 
 type collabMembersEntry struct {
 	names     map[string]string // display name -> open_id
+	bots      []collabDirectoryBot
 	fetchedAt time.Time
+}
+
+type collabDirectoryBot struct {
+	AppID  string `json:"app_id"`
+	OpenID string `json:"member_id"`
+	Name   string `json:"name"`
+}
+
+// 从群成员接口识别机器人身份，分工继续由自然语言表达，不要求 /role 自我介绍。
+// 调用方已持有本群状态锁。
+func (p *Platform) collabDiscoverBots(chatID string, st *collabChatState) {
+	if value, ok := p.collab.members.Load(chatID); ok {
+		for _, bot := range value.(*collabMembersEntry).bots {
+			if bot.AppID == "" || bot.OpenID == "" || bot.Name == "" {
+				continue
+			}
+			entry := st.Roster[bot.AppID]
+			if entry == nil {
+				entry = &collabRosterEntry{}
+				st.Roster[bot.AppID] = entry
+			}
+			entry.AppID, entry.OpenID, entry.Name = bot.AppID, bot.OpenID, bot.Name
+			st.MentionNames[bot.OpenID] = bot.Name
+		}
+	}
 }
 
 // collabMembers lists the people in a chat (name -> open_id), cached briefly.
@@ -953,6 +993,7 @@ func (p *Platform) collabMembers(ctx context.Context, chatID string) map[string]
 		}
 	}
 	names := make(map[string]string)
+	var bots []collabDirectoryBot
 	pageToken := ""
 	for range 20 {
 		q := url.Values{}
@@ -961,7 +1002,7 @@ func (p *Platform) collabMembers(ctx context.Context, chatID string) map[string]
 		if pageToken != "" {
 			q.Set("page_token", pageToken)
 		}
-		raw, err := p.collabGet(ctx, "/open-apis/im/v1/chats/"+chatID+"/members?"+q.Encode())
+		raw, err := p.collabGet(ctx, "/open-apis/im/v1/chats/"+chatID+"/members/list?"+q.Encode())
 		if err != nil {
 			slog.Warn(p.tag()+": collab list members", "chat_id", chatID, "error", err)
 			return names // not cached, so the next call retries
@@ -970,27 +1011,29 @@ func (p *Platform) collabMembers(ctx context.Context, chatID string) map[string]
 			Data struct {
 				HasMore   bool   `json:"has_more"`
 				PageToken string `json:"page_token"`
-				Items     []struct {
+				Users     []struct {
 					MemberID string `json:"member_id"`
 					Name     string `json:"name"`
-				} `json:"items"`
+				} `json:"users"`
+				Bots []collabDirectoryBot `json:"bots"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(raw, &result); err != nil {
 			slog.Warn(p.tag()+": collab parse members", "chat_id", chatID, "error", err)
 			return names
 		}
-		for _, it := range result.Data.Items {
+		for _, it := range result.Data.Users {
 			if it.Name != "" && it.MemberID != "" {
 				names[it.Name] = it.MemberID
 			}
 		}
+		bots = append(bots, result.Data.Bots...)
 		if !result.Data.HasMore || result.Data.PageToken == "" {
 			break
 		}
 		pageToken = result.Data.PageToken
 	}
-	p.collab.members.Store(chatID, &collabMembersEntry{names: names, fetchedAt: time.Now()})
+	p.collab.members.Store(chatID, &collabMembersEntry{names: names, bots: bots, fetchedAt: time.Now()})
 	return names
 }
 
@@ -1077,6 +1120,7 @@ func (p *Platform) collabTargets(ctx context.Context, chatID string) map[string]
 	p.mu.RUnlock()
 	unlock := p.collab.lockChat(chatID)
 	st := p.collab.load(chatID)
+	p.collabDiscoverBots(chatID, st)
 	for appID, e := range st.Roster {
 		if appID != p.appID && e.Name != "" && e.OpenID != "" {
 			targets[e.Name] = collabMentionTarget{openID: e.OpenID, isBot: true, owner: e.Owner}

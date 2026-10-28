@@ -430,3 +430,19 @@ func TestOnCardActionCollabOwnerOnly(t *testing.T) {
 		t.Fatalf("owner approval = %+v", msg)
 	}
 }
+
+// 不发 /role 时仍可从群成员目录得到对方名字和真正的 @ 地址。
+func TestCollabDirectoryDiscoveryWithoutRole(t *testing.T) {
+	p := &Platform{collab: newCollabRuntime(map[string]any{"collab": true})}
+	p.collab.members.Store("chat", &collabMembersEntry{bots: []collabDirectoryBot{{AppID: "app-peer", OpenID: "ou_peer", Name: "Peer"}}})
+	st := &collabChatState{Roster: map[string]*collabRosterEntry{}, MentionNames: map[string]string{}}
+	p.collabDiscoverBots("chat", st)
+	peer := st.Roster["app-peer"]
+	if peer == nil || peer.OpenID != "ou_peer" || peer.Role != "" {
+		t.Fatalf("missing unregistered bot: %+v", peer)
+	}
+	text := collabRenderReply("@Peer 请复核", map[string]collabMentionTarget{"Peer": {openID: peer.OpenID, isBot: true}}, 0, 6, "")
+	if !strings.Contains(text, "<at id=ou_peer>") {
+		t.Fatalf("not a real mention: %s", text)
+	}
+}

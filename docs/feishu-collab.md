@@ -1,109 +1,93 @@
-# 飞书群协作：让每个人的 Claude Code 在一个群里讨论方案
+# 飞书群协作：创建会话后直接讨论
 
-每个人把自己电脑上的 Claude Code 接成一个飞书机器人，拉进同一个群。在群里 @ 某个机器人，它会先把群里之前的讨论读一遍再回答；需要别人的意见时，它会在回复里 @ 那个人和他的机器人，对方的机器人接着读、接着答。
+每个人在自己的电脑上运行 cc-connect，把自己的飞书机器人加入群。一台电脑上的同一个机器人可以配置 Codex、Claude Code，或两种都配置。每种 Agent 指定一个会话工作目录；原生会话记录仍由对应 CLI 管理。
 
-这个功能是在 [cc-connect](https://github.com/chenhg5/cc-connect)（把 Claude Code 等编程 Agent 接到聊天软件的开源工具）上加的，原版没有，要用本仓库 [denmushi/cc-connect](https://github.com/denmushi/cc-connect) 编译的版本。
+## 安装与配置
 
-## 效果
-
-- 只有被 @ 才说话。说话前先读完群里上次之后的消息，第一次读最近 200 条。
-- 回复是 Markdown 卡片。回复里 @ 别的机器人时，会顺带 @ 它的主人。
-- 机器人之间连续说了 6 条、中间没人说话，就暂停并请最后提问的人拍板，防止机器人互相 @ 停不下来。
-- 只有主人能对自己的机器人用命令（`/list`、`/fork`、`/role` 等）和点审批，其他人只能跟它对话。
-- 默认只读：能读你指定目录里的代码，不能改文件、不能跑命令。
-
-## 准备
-
-- macOS 或 Linux 电脑。机器人跑在你自己的电脑上，电脑睡眠或关机时它就不在线。
-- Go 1.25 或更新：`go version` 查看，没装就 `brew install go`。
-- Claude Code 命令行版，并且已经登录：`claude auth status` 显示 `"loggedIn": true`；没登录就运行 `claude auth login`。
-- python3：macOS 装过 Xcode 命令行工具就有（`git` 能用就说明装过）。
-- 飞书手机 App，扫码建机器人用。
-
-## 一键配置
+准备 Go 1.25+、已安装并登录的 Codex 或 Claude Code、飞书账号。Python 脚本只有标准库依赖，在已激活的 Conda 环境里运行：
 
 ```bash
-git clone https://github.com/denmushi/cc-connect.git
-cd cc-connect
-python3 tools/feishu-collab-setup.py
+python tools/feishu-collab-setup.py
 ```
 
-脚本一步步引导，碰到要你在网页或手机上操作的地方会停下来等你：
+向导依次完成：
 
-1. **编译**：编译本仓库的 cc-connect。第一次要下载依赖，可能要几分钟；下载慢可以先运行 `go env -w GOPROXY=https://goproxy.cn,direct`。
-2. **生成配置**：问你 Agent 读哪个目录的代码。这个目录也决定 `/list` 能列出哪些 Claude Code 会话：只列在这个目录里开过的会话。
-3. **建机器人**：先问你有没有现成的飞书机器人。没有就在终端里出一个二维码，用飞书手机 App 扫码、确认创建；有就填它的 App ID 和 App Secret（输入时不显示），用现成的要先做几项设置，见下面「用现成的机器人」。
-4. **加权限**：脚本查出缺哪些权限，给一个直达链接，逐个点「开通」。扫码建的机器人缺的这几个都是免审权限，开通立即生效。
-5. **改名**：扫码建的机器人都叫「<你的名字>的智能助手」，同一个群里会重名，别的机器人也没法按名字 @ 它。按脚本给的链接改个好认的名字，比如「张三-Claude」，再创建版本并发布。发布不用审核，点了就生效。
-6. **拉群**：在讨论群里点「设置 → 群机器人 → 添加机器人」，搜机器人的名字加进来。脚本会列出机器人所在的群让你选，之后它只在选中的群里响应。
-7. **启动**：装成后台服务（macOS 用 launchd，Linux 用 systemd），开机自动运行，关掉终端也不停。
+1. 选择 `codex`、`cc` 或 `codex,cc`。
+2. 为每种 Agent 分别指定会话工作目录。目录不存在时会创建。
+3. 扫码新建飞书机器人，或输入已有机器人的 App ID 和 App Secret。
+4. 检查权限和名字，将机器人加入讨论群，再选择允许响应的群。
+5. 启动 cc-connect，可以选择安装后台服务。
 
-脚本可以重复运行：已有的配置和机器人会沿用，只补没做完的步骤。
+也可以预先指定 Agent 和目录，机器人设置仍由向导处理：
 
-所有文件都在 `~/.cc-connect-collab/`：
+```bash
+python tools/feishu-collab-setup.py --agents codex,cc --codex-dir ~/work/codex --cc-dir ~/work/claude
+```
 
-| 路径 | 是什么 |
-|---|---|
-| `bin/cc-connect` | 编译出来的程序 |
-| `config.toml` | 配置，里面有机器人密钥，别外传 |
-| `data/` | 会话状态 |
-| `logs/cc-connect.log` | 后台服务的日志 |
+修改已有配置或从旧版升级时加 `--reconfigure-agents`。脚本只更新 Agent 段，保留机器人凭证、群范围和其他设置。普通重跑沿用已有配置。
 
-### 用现成的机器人
+文件默认保存在 `~/.cc-connect-collab/`：`config.toml` 是配置，`data/` 是绑定和会话状态，`logs/cc-connect.log` 是运行日志。配置含机器人密钥，不要分享。
 
-在开发者后台自己建的机器人也能用，App ID 和 App Secret 在应用的「凭证与基础信息」里。绑定前先确认：
+## 群内使用
 
-- 开了「机器人」能力。
-- 「事件与回调」里选了「使用长连接接收事件」，订阅了事件 `im.message.receive_v1` 和回调 `card.action.trigger`。扫码建的机器人这些都自动配好了。
-- 这个机器人没有同时给别的程序用，比如另一个 cc-connect 或别的机器人程序，否则消息会被分走。
+从飞书的 @ 候选列表选中自己的机器人，然后发送以下任意一个命令：
 
-缺的权限脚本会帮你查。注意自己建的应用加权限、发布版本可能要管理员审批，不像扫码建的那样免审。
+```text
+@我的机器人 /codex-create
+```
 
-## 在群里第一次用
+```text
+@我的机器人 /cc-create
+```
 
-1. **登记定位**：`@你的机器人 /role 我负责后端，找我问接口和数据库设计`。它会发一张定位卡片。每个人的机器人都要登记一次，别的机器人才认得它，才能按名字 @ 它。
-2. **接上你终端里的会话（可选）**：如果你已经在终端里用 Claude Code 聊过这个方案，想让机器人带着那些内容参加讨论，先 `@你的机器人 /list` 列出会话，再 `@你的机器人 /fork 2` 绑定第 2 个会话的副本。副本带着原会话的全部内容，原会话不受影响，你在终端里还能接着用。不绑就从新会话开始。
-3. **开始讨论**：`@某个机器人 你的问题`。
+只有配置过的 Agent 可用。命令会在对应工作目录启动一个全新原生会话，收到创建成功回复后即可交流。每个 bot 在每个群里绑定一个当前会话：再执行创建命令会换到新会话，旧会话保留；不同群互不影响。正在回复时不会替换绑定，需等待本轮完成。程序重启后恢复已经保存的绑定。
 
-## 规则
+接下来直接说需求和分工，例如：
 
-- 群消息只有 @ 到机器人时才会触发它。它回答前会补读上次之后的所有群消息，包括别的机器人的发言。
-- 一个群共用一个会话。`/new` 开新会话后，它会重新读最近 200 条群消息。
-- 回复里写「@某人」「@某个机器人」会变成真正的 @，被 @ 的机器人会接着回答。
-- 机器人之间连续 6 条没人说话就暂停，有人发言后重新计数。
-- 只认主人：别人对你的机器人发命令会被拒绝，点审批按钮也无效。主人默认是飞书应用的所有者，也就是扫码建机器人的人。
+> 你负责接口方案，请和 @另一位机器人 讨论前端需要哪些数据。结论明确后告诉我。
 
-## 默认权限，以及怎么放开
+不需要登记定位、查询会话序号、填写会话 ID。这套入口只执行 `/codex-create` 和 `/cc-create`；`/role`、`/list`、`/switch`、`/fork`、`/new` 等旧命令不再执行。自然语言发给当前 Agent 理解，不会额外解析为桥接程序的管理指令。
 
-群里谁都能 @ 你的机器人，而它跑在你的电脑上，所以默认配置让它只读。配置在 `~/.cc-connect-collab/config.toml` 的 `[projects.agent.options]` 里：
+机器人通过群成员接口识别同伴，补读群历史后发 Markdown 卡片，需要交接时转换成真正的 @。没有人插话时，机器人连续发言默认最多 6 条。再次创建会话后重新读取最近 200 条群消息。
 
-- `mode = "dontAsk"`：没预先放行的工具一律拒绝，不在群里弹确认。
-- `disallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]`：不能跑命令、不能改文件。这一条优先于你 `~/.claude/settings.json` 里的放行规则。
-- `cmd = "claude --strict-mcp-config"`：不加载你自己配的 MCP 连接器（MCP 是 Claude Code 连外部工具的插件，比如飞书文档、数据库），免得群里的人借你的机器人访问这些数据。
+## 配置结构
 
-想放开的话，风险自负，因为群里任何人都能让它做这些事：
+```toml
+[[projects]]
+name = "collab"
+reset_on_idle_mins = 0
 
-- 让它能跑 `git log` 这类命令：从 `disallowed_tools` 里去掉 `"Bash"`。去掉后，你 `settings.json` 里放行的所有命令它都能跑。
-- 让它用你的 MCP 连接器：把 `cmd` 改回 `"claude"`。
+[[projects.agents]]
+type = "codex"
+[projects.agents.options]
+work_dir = "/path/to/codex-work"
+backend = "app_server"
+mode = "suggest"
 
-改完配置要重启：`~/.cc-connect-collab/bin/cc-connect daemon restart`
+[[projects.agents]]
+type = "claudecode"
+[projects.agents.options]
+work_dir = "/path/to/claude-work"
+mode = "dontAsk"
+disallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]
+cmd = "claude --strict-mcp-config"
 
-## 常见问题
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "<your-app-id>"
+app_secret = "<your-app-secret>"
+allow_chat = "<your-chat-id>"
+allow_from = "*"
+```
 
-**机器人没反应**：先用 `~/.cc-connect-collab/bin/cc-connect daemon status` 看服务在不在跑，再看日志 `tail -f ~/.cc-connect-collab/logs/cc-connect.log`。还要确认是在脚本里选过的群里 @ 的它。
+配置 `projects.agents` 后自动启用飞书群协作、按群共享会话和仅响应群聊。单独使用旧的 `projects.agent` 保留原有入口。
 
-**同事 @ 你的机器人没反应**（还没实测过）：可能是应用的「可用范围」只有你自己。到开发者后台创建新版本时，把群里的同事加进可用范围再发布。扫码建的应用可用范围最多 10 人。
+## 运行边界
 
-**后台服务里 claude 报登录失败**：后台服务读不到你在终端里 export 的环境变量，比如 `ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`。把它们写进 `~/.claude/settings.json` 的 `env` 里，再重启服务。
-
-**改名没生效**：改名要「创建版本并发布」之后才生效。
-
-**怎么更新**：在仓库目录里 `git pull`，再运行一次脚本，最后一步选重装后台服务。
-
-**一台电脑跑两个机器人**：后台服务一台电脑只能装一个。第二个用 `--home` 换个目录，加 `--no-service`，然后在普通终端里前台运行。别在 Claude Code 里前台运行，它会继承 Claude Code 的环境变量，机器人里的 claude 会出错。
-
-## 还不支持
-
-- Codex：群协作和 `/fork` 只在 Claude Code 上做过，Codex 还没接上。
-- 一个机器人只对应一个代码目录、一种 Agent。
-- 主人自己配的命令别名（alias）不受「只认主人」的限制。
+- 创建和审批仅机器人主人可操作，其他群成员可以自然语言交流。
+- 默认 Claude Code 不可写文件或执行命令，不加载个人 MCP；Codex 使用只读文件沙箱，仍可能运行只读命令，个人 MCP 是否启用由 Codex 本机设置决定。
+- 多机器人讨论需要各机器人开通接收其他机器人 @、读取群消息、读取群成员和发消息权限，安装向导会检查。
+- 会话和模型在每个人自己的电脑上运行，电脑睡眠、关机或进程退出后机器人离线。
+- 一台电脑测试多个机器人时，分别使用 `--home` 创建独立配置，并用 `--no-service` 前台启动；后台服务名目前固定，一台电脑只安装一个。
+- 只有本机部署的会话可用；不是连接另一台电脑或云端会话的入口。

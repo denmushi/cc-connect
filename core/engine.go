@@ -355,6 +355,7 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	groupAgents           *groupAgentRouting
 	name                  string
 	agent                 Agent
 	platforms             []Platform
@@ -2452,6 +2453,15 @@ func (e *Engine) Stop() error {
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
 	}
+	if e.groupAgents != nil {
+		for _, agent := range e.groupAgents.agents {
+			if agent != e.agent {
+				if err := agent.Stop(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
@@ -2972,6 +2982,13 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	if e.groupAgents != nil && !msg.Recalled {
+		unlock := e.groupAgents.lock(msg.SessionKey)
+		defer unlock()
+		if e.handleGroupAgentEntry(p, msg) {
+			return
+		}
+	}
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -3040,7 +3057,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
-	content = e.resolveAlias(content)
+	if e.groupAgents == nil {
+		content = e.resolveAlias(content)
+	}
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
@@ -3132,6 +3151,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	sessions := e.sessions
 	agent := e.agent
 	interactiveKey := msg.SessionKey
+	if e.groupAgents != nil {
+		agent, sessions = e.groupAgents.context(msg.SessionKey)
+		if agent == nil || sessions == nil {
+			return
+		}
+	}
 	if resolvedWorkspace != "" && wsSessions != nil {
 		sessions = wsSessions
 		agent = wsAgent
@@ -3313,6 +3338,9 @@ func runMessageAccepted(msg *Message) {
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session, lockGen uint64) (*Session, uint64) {
+	if e.groupAgents != nil {
+		return nil, 0
+	}
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil, 0
 	}
@@ -4345,7 +4373,11 @@ func withAgentContext(p Platform, replyCtx any, session *Session, content string
 	if !ok || session == nil {
 		return content
 	}
-	extra := cp.AgentContext(replyCtx, session.ID)
+	contextID := session.ID
+	if session.ContextScope != "" {
+		contextID = session.ContextScope + ":" + contextID
+	}
+	extra := cp.AgentContext(replyCtx, contextID)
 	if extra == "" {
 		return content
 	}
@@ -17250,6 +17282,13 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+	if e.groupAgents != nil {
+		agent, sessions := e.groupAgents.context(msg.SessionKey)
+		if agent == nil {
+			return nil, nil, "", "", fmt.Errorf("群内尚未创建会话")
+		}
+		return agent, sessions, msg.SessionKey, "", nil
+	}
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -17275,6 +17314,11 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+	if e.groupAgents != nil {
+		if agent, sessions := e.groupAgents.context(sessionKey); agent != nil {
+			return agent, sessions
+		}
+	}
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions

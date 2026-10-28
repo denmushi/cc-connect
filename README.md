@@ -42,25 +42,22 @@
 
 ## 💬 本分支新增：飞书群协作
 
-> This fork adds a Feishu group-collaboration mode: everyone runs their own Claude Code as a Feishu bot in one group, and the bots read the whole discussion and hand off to each other. Guide (in Chinese): [docs/feishu-collab.md](docs/feishu-collab.md).
+一个飞书机器人可以连接本机的 Codex 和 Claude Code，每种 Agent 配置自己的会话工作目录。把机器人加入讨论群，在群里创建并绑定会话，之后直接用自然语言讨论；机器人会补读群历史，并能互相 @ 接话。
 
-每个人把自己电脑上的 Claude Code 接成一个飞书机器人，拉进同一个群。@ 哪个机器人，它就先读完群里之前的讨论再回答；需要别人的意见时，它会 @ 那个人和他的机器人，对方的机器人接着读、接着答。原版 cc-connect 没有这个功能，要用本仓库编译的版本。
-
-**快速上手**（macOS 或 Linux；需要 Go 1.25 以上、已登录的 Claude Code 命令行、飞书手机 App）：
+**快速上手**：需要 Go 1.25+、已登录的 Codex 或 Claude Code（可以两种都配）、飞书账号，以及已激活的 Python Conda 环境。
 
 ```bash
 git clone https://github.com/denmushi/cc-connect.git
 cd cc-connect
-python3 tools/feishu-collab-setup.py
+python tools/feishu-collab-setup.py
 ```
 
-脚本会一步步带你：编译 → 生成配置 → 扫码建机器人（已有机器人也可以直接绑定）→ 检查权限和名字 → 选讨论群 → 装成后台服务。装好后在群里：
+安装向导依次询问 Agent 类型（可多选）、各自目录、机器人凭证和群范围。进入群后只有两个命令：
 
-1. `@你的机器人 /role 一句话说明它负责什么`：登记定位，别的机器人才认得它
-2. （可选）`@你的机器人 /list`，再 `@你的机器人 /fork 序号`：接上你在终端里用 Claude Code 聊过的会话
-3. `@任意机器人 你的问题`：开始讨论
+- `@你的机器人 /codex-create`：在配置的 Codex 工作目录新建会话并绑定本群。
+- `@你的机器人 /cc-create`：在配置的 Claude Code 工作目录新建会话并绑定本群。
 
-默认只读（不改文件、不跑命令），命令和审批只认机器人的主人。完整说明、默认权限和常见问题见 [docs/feishu-collab.md](docs/feishu-collab.md)。
+每个 bot 在每个群里只有一个当前会话。再次创建会绑定到新会话，旧会话保留；分工、提问和讨论用自然语言，不需要 `/role` 或其他会话命令。创建和审批只认机器人主人。详见 [docs/feishu-collab.md](docs/feishu-collab.md)。
 
 > 以下是上游 cc-connect 的原始介绍。
 

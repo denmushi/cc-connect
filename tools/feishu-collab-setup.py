@@ -62,18 +62,7 @@ enabled = false
 name = "collab"
 reset_on_idle_mins = 0  # 闲置多久都不自动换新会话
 
-[projects.agent]
-type = "claudecode"
-
-[projects.agent.options]
-work_dir = @WORK_DIR@  # Agent 读这个目录的代码；/list 列的是在这个目录里开过的 Claude Code 会话
-# 默认只读讨论：群里谁都能 @ 它，所以不让它改文件、跑命令。
-# dontAsk：没预先放行的工具一律拒绝，不在群里弹确认；disallowed_tools 优先于你 ~/.claude/settings.json 里的放行规则。
-mode = "dontAsk"
-disallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]
-# --strict-mcp-config：不加载你自己配的 MCP 连接器（飞书、数据库等），免得群里的人借机器人访问
-cmd = "claude --strict-mcp-config"
-# model = "sonnet"  # 不填就用你 Claude Code 的默认模型
+@AGENTS@
 
 [[projects.platforms]]
 type = "feishu"
@@ -176,20 +165,66 @@ def read_option(cfg_path, key):
     return m.group(1) if m else ""
 
 
+def agent_command(kind):
+    if kind == "claudecode":
+        return shutil.which("claude")
+    found = shutil.which("codex")
+    if found:
+        return found
+    for app in ("ChatGPT.app", "Codex.app"):
+        for rel in ("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"):
+            path = Path("/Applications") / app / rel
+            if path.is_file() and os.access(str(path), os.X_OK):
+                return str(path)
+    return None
+
+
 def check_tools():
     if not shutil.which("go"):
-        fail("没找到 go。先装 Go 1.25 或更新的版本（macOS：brew install go）")
-    claude = shutil.which("claude")
-    if not claude:
-        fail("没找到 claude 命令。先装 Claude Code 命令行版，装好后终端里能运行 claude")
-    try:
-        out = subprocess.run([claude, "auth", "status"], capture_output=True, text=True, timeout=30).stdout
-        logged_in = json.loads(out).get("loggedIn")
-    except Exception:
-        logged_in = None
-    if logged_in is False:
-        warn("命令行版 claude 还没登录：另开一个终端运行 claude auth login（用 API Key 或公司网关的可以忽略）")
-    say("✅ go 和 claude 都在")
+        fail("请先安装 Go 1.25 或更新版本")
+    if not any(agent_command(kind) for kind in ("codex", "claudecode")):
+        fail("请先安装并登录 Codex 或 Claude Code，至少需要一种")
+
+
+def pick_agents(given, home, codex_dir=None, cc_dir=None):
+    aliases = {"codex": "codex", "cc": "claudecode", "claudecode": "claudecode"}
+    available = [k for k in ("codex", "cc") if agent_command(aliases[k])]
+    while True:
+        explicit = given is not None
+        raw = given or ask("配置哪些 Agent？填 codex、cc，或 codex,cc", ",".join(available))
+        given = None
+        keys = list(dict.fromkeys(x.strip().lower() for x in raw.split(",") if x.strip()))
+        if keys and all(k in aliases and agent_command(aliases[k]) for k in keys):
+            break
+        if explicit:
+            fail("--agents 只能选择已安装的 codex、cc 或 codex,cc")
+        say("请选择已经安装的 Agent：codex、cc，支持多选")
+    profiles = {}
+    for key in keys:
+        kind = aliases[key]
+        if kind in profiles:
+            continue
+        supplied = codex_dir if kind == "codex" else cc_dir
+        raw = supplied or ask("%s 的会话工作目录" % key, str(home / "workspaces" / key))
+        path = Path(os.path.expanduser(raw)).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        profiles[kind] = str(path)
+    return profiles
+
+
+def agent_sections(profiles):
+    # 每种 Agent 独立目录；凭证复用对应 CLI 的本机登录态。
+    blocks = []
+    for kind, directory in profiles.items():
+        common = '[[projects.agents]]\ntype = ' + toml_str(kind)
+        common += '\n[projects.agents.options]\nwork_dir = ' + toml_str(directory)
+        if kind == "codex":
+            common += '\nbackend = "app_server"\nmode = "suggest"'
+        else:
+            common += '\nmode = "dontAsk"\ndisallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]'
+            common += '\ncmd = "claude --strict-mcp-config"'
+        blocks.append(common)
+    return "\n\n".join(blocks)
 
 
 def build(bin_path):
@@ -212,11 +247,24 @@ def pick_work_dir(given):
         say("目录 %s 不存在，重新填" % path)
 
 
-def write_config(cfg_path, home, work_dir):
-    text = CONFIG_TEMPLATE.replace("@DATA_DIR@", toml_str(str(home / "data"))).replace("@WORK_DIR@", toml_str(work_dir))
+def write_config(cfg_path, home, profiles):
+    text = CONFIG_TEMPLATE.replace("@DATA_DIR@", toml_str(str(home / "data"))).replace("@AGENTS@", agent_sections(profiles))
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(text, encoding="utf-8")
     os.chmod(str(cfg_path), 0o600)  # 之后会写进机器人密钥
+
+
+def replace_agent_sections(cfg_path, profiles):
+    # 仅更新 Agent 配置段，保留凭证、群范围及其他设置。
+    text = cfg_path.read_text(encoding="utf-8")
+    pattern = r"(?ms)^\[\[?projects\.agents?\]\]?.*?(?=^\[\[projects\.platforms\]\])"
+    if len(re.findall(r"(?m)^\[\[projects\]\]", text)) != 1:
+        fail("这份配置包含多个项目，请分别配置，避免覆盖其他项目")
+    text, count = re.subn(pattern, lambda _: agent_sections(profiles) + "\n\n", text, count=1)
+    if count != 1:
+        fail("没有找到可更新的 Agent 配置段，原配置保持不变")
+    cfg_path.write_text(text, encoding="utf-8")
+    os.chmod(str(cfg_path), 0o600)
 
 
 def choose_app(given):
@@ -375,6 +423,10 @@ def main():
     ap = argparse.ArgumentParser(description="飞书群协作机器人一键配置，说明见 docs/feishu-collab.md")
     ap.add_argument("--home", default="~/.cc-connect-collab", help="程序、配置、日志放在哪（默认 ~/.cc-connect-collab）")
     ap.add_argument("--work-dir", help="Agent 读哪个目录的代码（第一次生成配置时用）")
+    ap.add_argument("--agents", help="配置 codex、cc 或 codex,cc")
+    ap.add_argument("--codex-dir", help="Codex 会话工作目录")
+    ap.add_argument("--cc-dir", help="Claude Code 会话工作目录")
+    ap.add_argument("--reconfigure-agents", action="store_true", help="重新选择 Agent 和目录，保留机器人凭证及群设置")
     ap.add_argument("--app", help="直接绑定已有机器人：app_id:app_secret（不填会问你有没有现成的）")
     ap.add_argument("--skip-build", action="store_true", help="已经编译过时跳过编译")
     ap.add_argument("--no-service", action="store_true", help="不装后台服务，只打印前台启动命令")
@@ -396,9 +448,13 @@ def main():
 
     step(3, "生成配置")
     if cfg_path.exists():
-        say("沿用已有配置 %s（Agent 读的目录：%s）" % (cfg_path, read_option(cfg_path, "work_dir")))
+        if args.reconfigure_agents:
+            replace_agent_sections(cfg_path, pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir))
+        elif "[[projects.agents]]" not in cfg_path.read_text(encoding="utf-8"):
+            fail("已有配置是旧入口。加 --reconfigure-agents 重新选择 Agent，保留凭证和群设置")
+        say("沿用已有配置 %s" % cfg_path)
     else:
-        write_config(cfg_path, home, pick_work_dir(args.work_dir))
+        write_config(cfg_path, home, pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir))
         say("✅ 已生成 %s" % cfg_path)
 
     step(4, "建飞书机器人")
@@ -434,11 +490,9 @@ def main():
     started = start(bin_path, cfg_path, log_path, args.no_service)
 
     say("\n🎉 配置完成。到群里做这几件事：")
-    say("  1. 登记定位：@%s /role 一句话说明它负责什么、找它问什么" % name)
-    say("     每个人的机器人都要登记一次，别的机器人才认得它、才能按名字 @ 它")
-    say("  2. （可选）接上你终端里的会话：@%s /list 看会话列表，再 @%s /fork 序号" % (name, name))
-    say("     绑的是副本，原会话不受影响；不绑就从新会话开始")
-    say("  3. 讨论：@ 任意机器人提问，它会先读完群里之前的消息再回答")
+    say("  1. 选已配置的 Agent：@%s /codex-create 或 @%s /cc-create" % (name, name))
+    say("     在相应目录新建会话并绑定本群。再次创建会替换当前绑定，旧会话保留")
+    say("  2. 直接用自然语言说明分工、提问、找其他机器人讨论，不需要其他命令")
     say("\n配置：%s" % cfg_path)
     if started:
         say("日志：%s" % log_path)

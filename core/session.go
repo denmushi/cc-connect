@@ -29,6 +29,7 @@ type Session struct {
 	Name                string   `json:"name"`
 	AgentSessionID      string   `json:"agent_session_id"`
 	AgentType           string   `json:"agent_type,omitempty"`
+	ContextScope        string   `json:"context_scope,omitempty"` // 区分不同 Agent 的同名会话，切换后重新拉群历史。
 	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
@@ -815,6 +816,7 @@ func (sm *SessionManager) saveLocked() {
 			Name:                s.Name,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
+			ContextScope:        s.ContextScope,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,

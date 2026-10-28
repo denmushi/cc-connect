@@ -499,6 +499,7 @@ type ProjectConfig struct {
 	// local bindings.
 	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
 	Agent                        AgentConfig        `toml:"agent"`
+	Agents                       []AgentConfig      `toml:"agents,omitempty"` // 群模式可选 Agent，每种各自配置 work_dir。
 	Platforms                    []PlatformConfig   `toml:"platforms"`
 	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
@@ -1093,6 +1094,34 @@ func (c *Config) validateInternal(permissive bool) error {
 	}
 	for i, proj := range c.Projects {
 		prefix := fmt.Sprintf("projects[%d]", i)
+		if len(proj.Agents) > 0 {
+			if proj.Mode == "multi-workspace" || proj.RunAsUser != "" {
+				return fmt.Errorf("%s: agents cannot combine with multi-workspace or run_as_user", prefix)
+			}
+			seen := make(map[string]bool)
+			for j := range proj.Agents {
+				a := &proj.Agents[j]
+				if (a.Type != "codex" && a.Type != "claudecode") || seen[a.Type] {
+					return fmt.Errorf("%s: agents must contain unique codex/claudecode types", prefix)
+				}
+				seen[a.Type] = true
+				dir, _ := a.Options["work_dir"].(string)
+				if strings.TrimSpace(dir) == "" {
+					return fmt.Errorf("%s: agent %s requires work_dir", prefix, a.Type)
+				}
+				a.Options["work_dir"] = expandUserPath(dir)
+				if len(a.ProviderRefs) > 0 {
+					return fmt.Errorf("%s: agents use local CLI login or inline providers, not provider_refs", prefix)
+				}
+			}
+			for _, platform := range proj.Platforms {
+				if platform.Type != "feishu" {
+					return fmt.Errorf("%s: agents currently requires feishu", prefix)
+				}
+			}
+			proj.Agent = proj.Agents[0]
+			c.Projects[i].Agent = proj.Agent
+		}
 		if proj.Name == "" {
 			return fmt.Errorf("config: %s.name is required", prefix)
 		}

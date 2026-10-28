@@ -387,6 +387,12 @@ func main() {
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			if len(proj.Agents) > 0 {
+				opts["collab"] = true
+				opts["collab_create_only"] = true
+				opts["share_session_in_channel"] = true
+				opts["group_only"] = true
+			}
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
@@ -397,7 +403,7 @@ func main() {
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
-		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
+		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace" || len(proj.Agents) > 0)
 		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
@@ -419,6 +425,24 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		if len(proj.Agents) > 0 {
+			choices := map[string]core.Agent{proj.Agent.Type: agent}
+			for _, profile := range proj.Agents[1:] {
+				profileProject := proj
+				profileProject.Agent = profile
+				choice, err := core.CreateAgent(profile.Type, buildAgentOptions(cfg.DataDir, profileProject))
+				if err != nil {
+					slog.Error("failed to create group agent", "agent", profile.Type, "error", err)
+					os.Exit(1)
+				}
+				wireAgentProviders(choice, profile)
+				choices[profile.Type] = choice
+			}
+			if err := engine.SetGroupAgents(choices, projectStatePath(cfg.DataDir, proj.Name)+".group-agents.json"); err != nil {
+				slog.Error("failed to load group agent bindings", "error", err)
+				os.Exit(1)
+			}
+		}
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)

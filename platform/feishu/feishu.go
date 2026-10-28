@@ -803,6 +803,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			actionVal += " " + strings.Join(ids, ",")
 		}
 	}
+	// 新群入口不再执行旧卡片上的命令和导航；审批及 Agent 提问仍由本人响应。
+	if p.collab != nil && p.collab.createOnly && (strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "cmd:") || strings.HasPrefix(actionVal, "act:")) {
+		return nil, nil
+	}
 
 	userID := ""
 	if event.Event.Operator != nil {
