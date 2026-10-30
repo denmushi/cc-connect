@@ -109,6 +109,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	fs := flag.NewFlagSet("feishu "+requestedMode, flag.ExitOnError)
 	configFile := fs.String("config", "", "path to config file")
 	project := fs.String("project", "", "project name (optional if only one project)")
+	pool := fs.Bool("pool", false, "add/update a bot in the shared bot pool")
 	platformIndex := fs.Int("platform-index", 0, "1-based index among feishu/lark platforms in the project (0 = first)")
 	platformType := fs.String("platform-type", "", "force platform type: feishu or lark")
 	app := fs.String("app", "", "existing bot credentials in app_id:app_secret format")
@@ -133,10 +134,23 @@ func runFeishuSetup(args []string, requestedMode string) {
 		os.Exit(1)
 	}
 
-	targetProject, err := resolveTargetProject(*project)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	targetProject := ""
+	if !*pool {
+		targetProject, err = resolveTargetProject(*project)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		cfg, err := config.LoadPermissive(config.ConfigPath)
+		if err != nil || len(cfg.Agents) == 0 {
+			fmt.Fprintln(os.Stderr, "请先运行配置向导，选择共享 Agent 和会话目录，再添加机器人")
+			os.Exit(1)
+		}
+		if *project != "" || *platformIndex != 0 {
+			fmt.Fprintln(os.Stderr, "机器人池不需要指定 project 或 platform-index")
+			os.Exit(1)
+		}
 	}
 
 	normalizedType, err := normalizeFeishuPlatformType(*platformType)
@@ -184,6 +198,18 @@ func runFeishuSetup(args []string, requestedMode string) {
 	}
 
 	provisionType := finalPlatformType
+	if *pool {
+		if provisionType != "" && provisionType != "feishu" {
+			fmt.Fprintln(os.Stderr, "机器人池目前仅支持飞书")
+			os.Exit(1)
+		}
+		if err := config.SavePoolBot(resolvedAppID, resolvedAppSecret, ownerOpenID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ 已添加到机器人列表：%s\n", resolvedAppID)
+		return
+	}
 	if provisionType == "" {
 		provisionType = "feishu"
 	}

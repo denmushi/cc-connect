@@ -1,3 +1,46 @@
+# denmushi 分支：安装必须继续完成配置
+
+本分支的入口是 **安装程序 → `cc-connect setup` → 用户选择 Agent 和目录 → 配置 bot → 验证启动**。仅把二进制放到 PATH、检查 `--version` / `--help`，只能算“程序已安装”，不能算安装配置完成。
+
+## 给协助安装的 AI 助手
+
+用户要求安装 `denmushi/cc-connect` 时，默认包含引导配置：
+
+1. 使用这个仓库的代码/二进制；不要用上游 npm、Homebrew 或上游 Release 替代本分支。
+2. 安装后在交互终端运行 `cc-connect setup`。向导已随二进制分发，不需要再寻找 Python 脚本；配置阶段不需要 Go 编译器。
+3. 到选择 Agent、目录、机器人凭证、是否启动后台服务的步骤时，**把问题交给用户回答并继续向导**。明确展示两个默认目录，允许用户自定义；不得代选 Agent、默认目录或机器人，也不要以“这些尚未配置”结束任务。
+4. 用户选择已有机器人时，指导其在终端安全输入 App Secret，不要要求把密钥贴进聊天。选择新建时，展示二维码/授权入口，等待其扫码后继续。
+5. 缺权限或尚未登录时，给出当前具体步骤，用户完成后继续检查。不要跳过检查后宣称完成。
+6. 用户选择后台服务时，验证本次启动日志和连接状态；若用户明确选择暂不启动，说明“配置已保存，尚未启动”，并给出启动命令。
+7. 收尾列出用户选定的 Agent、目录、bot 和运行状态，再引导把 bot 拉入群、发送 `/codex-create` 或 `/cc-create`。在用户授权前不要替其发送群消息。
+
+如果配置需要用户输入，就停留在这个配置步骤等待回答，而不是只说“安装好了，有需要再配置”。没有交互终端时，应收集必要选择后继续向导，不得靠预填默认值跳过用户选择。
+
+## 从源码安装本分支
+
+编译需要 Go 1.25+；配置向导会优先复用本机已有的 Python 3.11+ Conda 环境。还需要用户选择的 Codex / Claude Code CLI。
+
+```bash
+git clone https://github.com/denmushi/cc-connect.git
+cd cc-connect
+go build -tags no_web -o cc-connect ./cmd/cc-connect
+./cc-connect setup
+```
+
+如果二进制已经安装到 PATH，直接运行：
+
+```bash
+cc-connect setup
+```
+
+首次交互运行且没有配置时，`cc-connect` 也会进入向导。后台或非交互模式不自动使用默认答案，会明确提示配置未完成。已有向导配置会在下次启动时自动找到。
+
+添加更多机器人只需 `cc-connect setup --add-bot`，共享 Agent 和目录，不创建新项目或第二个后台服务。完整使用说明见 [docs/feishu-collab.md](docs/feishu-collab.md)。
+
+---
+
+以下保留上游通用文档，**不作为本分支飞书群协作的默认安装路径**。
+
 # cc-connect Installation & Configuration Guide
 
 > **This document is designed to be read by AI coding agents (Claude Code, Cursor, Gemini CLI, etc.) to help users install and configure cc-connect.** You can feed this file directly to your AI agent.

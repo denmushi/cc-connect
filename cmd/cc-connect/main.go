@@ -207,6 +207,7 @@ var topLevelCommandHandlers = map[string]func([]string){
 		fmt.Print(ccconnect.ConfigExampleTOML)
 	},
 	"config": runConfig,
+	"setup":  runSetup,
 	"update": func(_ []string) {
 		runUpdate()
 	},
@@ -301,6 +302,10 @@ func main() {
 	core.CurrentBuildTime = buildTime
 
 	configPath := resolveConfigPath(rootOpts.configPath)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		missingConfigSetup(rootOpts.configPath)
+		return
+	}
 
 	// Handle --force: kill any existing instance before we try to acquire the lock
 	if rootOpts.force {
@@ -318,26 +323,18 @@ func main() {
 	}
 	slog.Info("acquired instance lock", "path", instanceLock.Path())
 
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		if err := bootstrapConfig(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Created default config at %s\n", configPath)
-		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect again.")
-		os.Exit(0)
-	}
-
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config (%s): %v\n", configPath, err)
+		fmt.Fprintln(os.Stderr, "配置尚未完成。请运行 cc-connect setup 继续配置；不要只检查版本和帮助就结束安装。")
 		os.Exit(1)
 	}
 
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
-	if len(cfg.Projects) == 0 {
+	runtimeProjects := cfg.RuntimeProjects()
+	if len(runtimeProjects) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
 		fmt.Fprintln(os.Stderr, "  cc-connect init")
@@ -355,10 +352,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	engines := make([]*core.Engine, 0, len(cfg.Projects))
-	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
+	engines := make([]*core.Engine, 0, len(runtimeProjects))
+	effectiveWorkDirs := make([]string, 0, len(runtimeProjects))
 
-	for _, proj := range cfg.Projects {
+	for _, proj := range runtimeProjects {
 		// Inject project-level run_as_user / run_as_env into the agent's
 		// opts map so agents that support isolation can pick them up
 		// without needing their own top-level config plumbing.
@@ -1014,7 +1011,7 @@ func main() {
 			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
-			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
+			cronSched.RegisterEngine(runtimeProjects[i].Name, e)
 			e.SetCronScheduler(cronSched)
 		}
 	}
@@ -1034,14 +1031,14 @@ func main() {
 			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
-			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			timerSched.RegisterEngine(runtimeProjects[i].Name, e)
 			e.SetTimerScheduler(timerSched)
 		}
 	}
 
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
-	for i, proj := range cfg.Projects {
+	for i, proj := range runtimeProjects {
 		hbCfg := buildHeartbeatConfig(proj.Heartbeat)
 		if hbCfg.Enabled {
 			heartbeatSched.Register(proj.Name, hbCfg, engines[i], effectiveWorkDirs[i])
@@ -1099,8 +1096,8 @@ func main() {
 			os.Exit(1)
 		}
 		for i, e := range engines {
-			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
-			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
+			bp := bridgeSrv.NewPlatform(runtimeProjects[i].Name)
+			bridgeSrv.RegisterEngine(runtimeProjects[i].Name, e, bp)
 			e.AddPlatform(bp)
 		}
 		bridgeSrv.Start()
@@ -1119,7 +1116,7 @@ func main() {
 		}
 		webhookSrv = core.NewWebhookServer(port, cfg.Webhook.Token, path)
 		for i, e := range engines {
-			webhookSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			webhookSrv.RegisterEngine(runtimeProjects[i].Name, e)
 		}
 		webhookSrv.Start()
 	}
@@ -1133,7 +1130,7 @@ func main() {
 		}
 		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
 		for i, e := range engines {
-			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			mgmtSrv.RegisterEngine(runtimeProjects[i].Name, e)
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
@@ -1315,14 +1312,14 @@ func main() {
 		dirHistory := core.NewDirHistory(cfg.DataDir)
 
 		for i, e := range engines {
-			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			apiSrv.RegisterEngine(runtimeProjects[i].Name, e)
 			e.SetRelayManager(relayMgr)
 			e.SetDirHistory(dirHistory)
 
 			// Ensure initial work_dir is in history
 			if initWorkDir := effectiveWorkDirs[i]; initWorkDir != "" {
-				if !dirHistory.Contains(cfg.Projects[i].Name, initWorkDir) {
-					dirHistory.Add(cfg.Projects[i].Name, initWorkDir)
+				if !dirHistory.Contains(runtimeProjects[i].Name, initWorkDir) {
+					dirHistory.Add(runtimeProjects[i].Name, initWorkDir)
 				}
 			}
 		}
@@ -1604,9 +1601,21 @@ func resolveConfigPath(explicit string) string {
 		return "config.toml"
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "config.toml")
+		return userConfigPath(home)
 	}
 	return "config.toml"
+}
+
+func userConfigPath(home string) string {
+	legacy := filepath.Join(home, ".cc-connect", "config.toml")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	collab := filepath.Join(home, ".cc-connect-collab", "config.toml")
+	if _, err := os.Stat(collab); err == nil {
+		return collab
+	}
+	return legacy
 }
 
 func bootstrapConfig(path string) error {
@@ -1681,6 +1690,7 @@ Flags:
   --help             Show this help message
 
 Commands:
+  setup              引导完成 Agent、目录、机器人和启动配置（新增机器人：setup --add-bot）
   daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
@@ -1791,11 +1801,12 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
 	}
 
-	// Find the matching project
+	// Find the matching runtime bot or legacy project.
 	var proj *config.ProjectConfig
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projName {
-			proj = &cfg.Projects[i]
+	projects := cfg.RuntimeProjects()
+	for i := range projects {
+		if projects[i].Name == projName {
+			proj = &projects[i]
 			break
 		}
 	}

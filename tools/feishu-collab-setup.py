@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""飞书群协作机器人一键配置（cc-connect 群协作模式，说明见 docs/feishu-collab.md）。
+"""配置共享 Agent 和飞书机器人池（Python 3.11+，在 Conda 环境运行）。
 
-在仓库根目录运行：
-  python3 tools/feishu-collab-setup.py                        # 会问有没有现成的机器人：没有就扫码新建，有就填凭证绑定
-  python3 tools/feishu-collab-setup.py --app cli_xxx:密钥     # 直接绑定已有机器人，不问
-
-依次做：编译本仓库的 cc-connect → 生成配置 → 建机器人 → 检查权限和名字 → 选讨论群 → 装后台服务。
-可以重复运行：已有的配置和机器人会沿用，只补没做完的步骤；git pull 之后重跑就是更新。
+首次配置/重新配置：python tools/feishu-collab-setup.py
+追加机器人：python tools/feishu-collab-setup.py --add-bot
+正常配置会询问各 Agent 的目录，显示默认路径；追加 bot 复用已确认的 Agent 配置。
 """
 
 import argparse
@@ -23,9 +20,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from collab_config import (configure_agents, default_config, migrate_pool, read_config,
+                           upsert_bot, write_config as write_pool_config)
+
 REPO = Path(__file__).resolve().parent.parent
 OPEN_API = "https://open.feishu.cn"
-PROJECT = "collab"
 DEFAULT_NAME_SUFFIX = "的智能助手"  # 扫码建的机器人默认叫「<人名>的智能助手」
 
 # 群协作要的权限。扫码建的机器人自带大部分，通常只缺前三个（都是免审权限，开通立即生效）。
@@ -39,42 +38,6 @@ REQUIRED_SCOPES = [
     "im:message:send_as_bot",  # 以机器人身份发消息
     "application:application:self_manage",  # 读应用信息：自动识别机器人主人
 ]
-
-CONFIG_TEMPLATE = """\
-# 飞书群协作机器人配置，由 tools/feishu-collab-setup.py 生成，说明见 docs/feishu-collab.md
-language = "zh"
-data_dir = @DATA_DIR@
-
-[log]
-level = "info"
-
-# 群里只发最终回复，不刷思考过程和工具进度
-[display]
-thinking_messages = false
-tool_messages = false
-reply_footer = false
-show_context_indicator = false
-
-[stream_preview]
-enabled = false
-
-[[projects]]
-name = "collab"
-reset_on_idle_mins = 0  # 闲置多久都不自动换新会话
-
-@AGENTS@
-
-[[projects.platforms]]
-type = "feishu"
-
-[projects.platforms.options]
-collab = true                    # 群协作模式
-share_session_in_channel = true  # 一个群共用一个会话
-allow_from = "*"                 # 群里谁都能 @ 它对话；命令和审批只认主人
-allow_chat = ""                  # 只在这些群里响应，脚本选群后填入
-group_only = true                # 不理私聊
-"""
-
 
 class ApiError(Exception):
     pass
@@ -160,9 +123,6 @@ def toml_str(s):
     return json.dumps(s, ensure_ascii=False)
 
 
-def read_option(cfg_path, key):
-    m = re.search(r'^\s*%s\s*=\s*"([^"]*)"' % re.escape(key), cfg_path.read_text(encoding="utf-8"), re.M)
-    return m.group(1) if m else ""
 
 
 def agent_command(kind):
@@ -179,14 +139,43 @@ def agent_command(kind):
     return None
 
 
-def check_tools():
-    if not shutil.which("go"):
+def check_tools(require_go=True):
+    if require_go and not shutil.which("go"):
         fail("请先安装 Go 1.25 或更新版本")
     if not any(agent_command(kind) for kind in ("codex", "claudecode")):
         fail("请先安装并登录 Codex 或 Claude Code，至少需要一种")
 
 
-def pick_agents(given, home, codex_dir=None, cc_dir=None):
+def check_agent_login(agents):
+    for agent in agents:
+        kind = agent["type"]
+        binary = agent_command(kind)
+        if not binary:
+            fail("未找到 %s 命令，请安装后重新运行 cc-connect setup" % kind)
+        status_args = ["auth", "status"] if kind == "claudecode" else ["login", "status"]
+        login_command = "claude auth login" if kind == "claudecode" else "codex login"
+        while True:
+            try:
+                result = subprocess.run([binary] + status_args, capture_output=True, text=True, timeout=20)
+                logged_in = result.returncode == 0
+                if kind == "claudecode":
+                    logged_in = logged_in and json.loads(result.stdout).get("loggedIn") is True
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                logged_in = False
+            if logged_in:
+                say("✅ %s 的本机登录状态正常" % kind)
+                break
+            say("还未确认 %s 可用。请另开终端运行 %s 完成登录。" % (kind, login_command))
+            answer = ask("完成后回车重试；已自行验证 API/网关可用输入 s；取消输入 q").lower()
+            if answer == "s":
+                say("按你的确认使用现有 API/网关配置")
+                break
+            if answer == "q":
+                fail("Agent 登录尚未完成，完成后请重新运行 cc-connect setup")
+
+
+def pick_agents(given, home, codex_dir=None, cc_dir=None, current=None):
+    current = current or {}
     aliases = {"codex": "codex", "cc": "claudecode", "claudecode": "claudecode"}
     available = [k for k in ("codex", "cc") if agent_command(aliases[k])]
     while True:
@@ -205,26 +194,16 @@ def pick_agents(given, home, codex_dir=None, cc_dir=None):
         if kind in profiles:
             continue
         supplied = codex_dir if kind == "codex" else cc_dir
-        raw = supplied or ask("%s 的会话工作目录" % key, str(home / "workspaces" / key))
+        default = current.get(kind) or str(home / "workspaces" / key)
+        label = "Codex" if kind == "codex" else "Claude Code"
+        say("%s 默认会话工作目录：%s" % (label, default))
+        raw = supplied or ask("%s 会话工作目录（回车使用默认，或输入自定义路径）" % label, default)
         path = Path(os.path.expanduser(raw)).resolve()
         path.mkdir(parents=True, exist_ok=True)
         profiles[kind] = str(path)
+        say("✅ %s 会话工作目录：%s" % (label, path))
     return profiles
 
-
-def agent_sections(profiles):
-    # 每种 Agent 独立目录；凭证复用对应 CLI 的本机登录态。
-    blocks = []
-    for kind, directory in profiles.items():
-        common = '[[projects.agents]]\ntype = ' + toml_str(kind)
-        common += '\n[projects.agents.options]\nwork_dir = ' + toml_str(directory)
-        if kind == "codex":
-            common += '\nbackend = "app_server"\nmode = "suggest"'
-        else:
-            common += '\nmode = "dontAsk"\ndisallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]'
-            common += '\ncmd = "claude --strict-mcp-config"'
-        blocks.append(common)
-    return "\n\n".join(blocks)
 
 
 def build(bin_path):
@@ -237,34 +216,10 @@ def build(bin_path):
     say("✅ 已编译到 %s" % bin_path)
 
 
-def pick_work_dir(given):
-    while True:
-        raw = given or ask("Agent 读哪个目录的代码？填路径，比如 ~/code/my-service")
-        given = None
-        path = Path(os.path.expanduser(raw)).resolve()
-        if path.is_dir():
-            return str(path)
-        say("目录 %s 不存在，重新填" % path)
-
-
-def write_config(cfg_path, home, profiles):
-    text = CONFIG_TEMPLATE.replace("@DATA_DIR@", toml_str(str(home / "data"))).replace("@AGENTS@", agent_sections(profiles))
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(text, encoding="utf-8")
-    os.chmod(str(cfg_path), 0o600)  # 之后会写进机器人密钥
-
-
-def replace_agent_sections(cfg_path, profiles):
-    # 仅更新 Agent 配置段，保留凭证、群范围及其他设置。
-    text = cfg_path.read_text(encoding="utf-8")
-    pattern = r"(?ms)^\[\[?projects\.agents?\]\]?.*?(?=^\[\[projects\.platforms\]\])"
-    if len(re.findall(r"(?m)^\[\[projects\]\]", text)) != 1:
-        fail("这份配置包含多个项目，请分别配置，避免覆盖其他项目")
-    text, count = re.subn(pattern, lambda _: agent_sections(profiles) + "\n\n", text, count=1)
-    if count != 1:
-        fail("没有找到可更新的 Agent 配置段，原配置保持不变")
-    cfg_path.write_text(text, encoding="utf-8")
-    os.chmod(str(cfg_path), 0o600)
+def supports_pool(bin_path):
+    result = subprocess.run([str(bin_path), "feishu", "setup", "--help"],
+                            capture_output=True, text=True, timeout=10)
+    return "-pool" in result.stdout + result.stderr
 
 
 def choose_app(given):
@@ -289,26 +244,28 @@ def choose_app(given):
 
 
 def setup_bot(bin_path, cfg_path, app):
-    cmd = [str(bin_path), "feishu", "setup", "--config", str(cfg_path), "--project", PROJECT]
+    cmd = [str(bin_path), "feishu", "setup", "--config", str(cfg_path), "--pool"]
     if app:
         cmd += ["--app", app]
     else:
         say("马上会出一个二维码：用飞书手机 App 扫码，按提示确认创建机器人（10 分钟内有效）。")
     if subprocess.run(cmd).returncode != 0:
         fail("建机器人没成功，看上面的报错。也可以在开发者后台建好应用后用 --app app_id:app_secret 绑定")
-    say("（上面关于 allow_from 和机器人菜单的提示可以忽略，群协作要的配置脚本已经写好了）")
 
 
-def check_scopes(api):
+
+def check_scopes(api, configured_owner=""):
     while True:
         try:
             app = api.get("/open-apis/application/v6/applications/" + api.app_id,
                           {"lang": "zh_cn", "user_id_type": "open_id"})["data"]["app"]
             have = {s.get("scope") for s in app.get("scopes") or []}
             missing = [s for s in REQUIRED_SCOPES if s not in have]
-            if not missing and not (app.get("owner") or {}).get("owner_id"):
-                warn("查不到机器人的主人，命令和审批会对所有人锁死。"
-                     "在配置的 [projects.platforms.options] 里加 collab_owner = \"你的 open_id\"")
+            if not missing and not ((app.get("owner") or {}).get("owner_id") or configured_owner):
+                say("权限已齐全，但还不能识别机器人主人。请在开发者后台确认应用所有者和发布状态。")
+                if not wait_enter("确认后"):
+                    fail("主人身份尚未确认，配置未完成；确认后请重新运行 cc-connect setup")
+                continue
         except ApiError as e:
             warn("查不到应用的权限：%s。下面按全部所需权限给链接，已开通的会显示「已开通」" % e)
             missing = list(REQUIRED_SCOPES)
@@ -319,8 +276,7 @@ def check_scopes(api):
         say("打开下面的链接，逐个点「开通」（扫码建的机器人都是免审权限，开通立即生效，不用发版）：")
         say("  %s/app/%s/auth?q=%s&op_from=openapi&token_type=tenant" % (OPEN_API, api.app_id, ",".join(missing)))
         if not wait_enter("开通后"):
-            warn("跳过了权限检查，缺权限时机器人读不到群消息或 @ 不了人")
-            return
+            fail("权限尚未确认，配置未完成；开通后请重新运行 cc-connect setup")
 
 
 def check_name(api):
@@ -328,8 +284,7 @@ def check_name(api):
         try:
             name = api.get("/open-apis/bot/v3/info").get("bot", {}).get("app_name", "")
         except ApiError as e:
-            warn("查不到机器人名字：%s" % e)
-            return ""
+            fail("机器人信息尚未验证，配置未完成：%s。请处理后重新运行 cc-connect setup" % e)
         if name and not name.endswith(DEFAULT_NAME_SUFFIX):
             say("✅ 机器人叫「%s」" % name)
             return name
@@ -338,7 +293,7 @@ def check_name(api):
         say("  1) 打开 %s/app/%s/baseinfo ，把「应用名称」改成好认的名字，比如「%s-Claude」" % (OPEN_API, api.app_id, guess))
         say("  2) 打开 %s/app/%s/version ，创建版本并发布（发布不用审核，点了就生效）" % (OPEN_API, api.app_id))
         if not wait_enter("改好并发布后"):
-            return name
+            fail("机器人名字尚未确认，配置未完成；发布后请重新运行 cc-connect setup")
 
 
 def pick_chats(api, bot_name, current):
@@ -370,19 +325,37 @@ def pick_chats(api, bot_name, current):
         say("填列表里的序号，比如 1 或 1,3")
 
 
-def set_allow_chat(cfg_path, chat_ids):
-    text = cfg_path.read_text(encoding="utf-8")
-    pattern = re.compile(r"^allow_chat\s*=.*$", re.M)
-    value = ",".join(chat_ids)
-    if len(pattern.findall(text)) != 1:
-        warn('没能自动写入，请在 %s 的 [projects.platforms.options] 里手动加：allow_chat = "%s"' % (cfg_path, value))
-        return
-    text = pattern.sub(lambda _: 'allow_chat = "%s"  # 只在这些群里响应' % value, text)
-    cfg_path.write_text(text, encoding="utf-8")
-    say("✅ 已写入配置：只在选中的 %d 个群里响应" % len(chat_ids))
+
+
+def wait_for_service_ready(log_path, log_offset):
+    for _ in range(30):
+        if log_path.exists():
+            with open(str(log_path), "rb") as stream:
+                stream.seek(log_offset if log_path.stat().st_size >= log_offset else 0)
+                if b'msg="cc-connect is running"' in stream.read():
+                    say("✅ 后台服务已启动")
+                    return True
+        time.sleep(1)
+    fail("配置已保存，但未确认后台启动成功。请查看日志 %s，处理后重新运行 cc-connect setup" % log_path)
 
 
 def start(bin_path, cfg_path, log_path, no_service):
+    if not no_service:
+        meta_path = Path.home() / ".cc-connect" / "daemon.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        installed_config = Path(meta.get("work_dir", "/nonexistent")) / "config.toml"
+        if installed_config.resolve() == cfg_path.resolve() and Path(meta.get("binary_path", "/nonexistent")).resolve() == bin_path.resolve():
+            status = subprocess.run([str(bin_path), "daemon", "status"], capture_output=True, text=True)
+            if status.returncode == 0 and "not installed" not in status.stdout.lower():
+                if not confirm("重启现有后台服务，让新的机器人列表生效吗"):
+                    return False
+                log_offset = log_path.stat().st_size if log_path.exists() else 0
+                if subprocess.run([str(bin_path), "daemon", "restart"]).returncode != 0:
+                    fail("重启失败，请查看后台服务日志")
+                return wait_for_service_ready(log_path, log_offset)
     if no_service or not confirm("装成后台服务吗？开机自动运行，关掉终端也不停"):
         say("没装后台服务。要用的时候在普通终端里前台运行（关掉终端就停）：")
         say("  %s --config %s" % (bin_path, cfg_path))
@@ -407,101 +380,137 @@ def start(bin_path, cfg_path, log_path, no_service):
             return False
         if subprocess.run(cmd + ["--force"]).returncode != 0:
             fail("重装后台服务失败，看上面的报错")
-    for _ in range(30):  # 等它启动完
-        if log_path.exists():
-            with open(str(log_path), "rb") as f:
-                f.seek(log_offset if log_path.stat().st_size >= log_offset else 0)
-                if b'msg="cc-connect is running"' in f.read():
-                    say("✅ 后台服务已启动")
-                    return True
-        time.sleep(1)
-    warn("30 秒内没在日志里看到启动成功，看看日志：tail -f %s" % log_path)
-    return True
+    return wait_for_service_ready(log_path, log_offset)
+
+
+def select_bot(data, add=False, credentials=None):
+    bots = data.get("bots", [])
+    if credentials or add or not bots:
+        return None
+    say("已配置的机器人（共用上面的 Agent 和目录）：")
+    for index, bot in enumerate(bots, 1):
+        say("  %d. %s（%s）" % (index, bot.get("name") or "未命名机器人", bot["app_id"]))
+    while True:
+        answer = ask("选择要配置的机器人序号；输入 a 添加一个机器人", "1")
+        if answer.lower() == "a":
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(bots):
+            return dict(bots[int(answer) - 1])
+        say("请输入列表中的序号，或 a")
+
+
+def prepare_agents(data, args, home):
+    current = {a["type"]: a.get("options", {}).get("work_dir", "") for a in data.get("agents", [])}
+    if args.add_bot and current and not args.reconfigure_agents:
+        for kind, directory in current.items():
+            say("复用 %s 会话工作目录：%s" % (kind, directory))
+        return
+    # 正常安装/重新配置始终询问目录，已有配置也不能静默跳过。
+    profiles = pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir, current)
+    configure_agents(data, profiles)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="飞书群协作机器人一键配置，说明见 docs/feishu-collab.md")
-    ap.add_argument("--home", default="~/.cc-connect-collab", help="程序、配置、日志放在哪（默认 ~/.cc-connect-collab）")
-    ap.add_argument("--work-dir", help="Agent 读哪个目录的代码（第一次生成配置时用）")
-    ap.add_argument("--agents", help="配置 codex、cc 或 codex,cc")
-    ap.add_argument("--codex-dir", help="Codex 会话工作目录")
-    ap.add_argument("--cc-dir", help="Claude Code 会话工作目录")
-    ap.add_argument("--reconfigure-agents", action="store_true", help="重新选择 Agent 和目录，保留机器人凭证及群设置")
-    ap.add_argument("--app", help="直接绑定已有机器人：app_id:app_secret（不填会问你有没有现成的）")
-    ap.add_argument("--skip-build", action="store_true", help="已经编译过时跳过编译")
-    ap.add_argument("--no-service", action="store_true", help="不装后台服务，只打印前台启动命令")
+    ap = argparse.ArgumentParser(description="配置共享 Agent 和飞书机器人池")
+    ap.add_argument("--home", default="~/.cc-connect-collab")
+    ap.add_argument("--agents", help="codex、cc 或 codex,cc")
+    ap.add_argument("--codex-dir", help="明确指定 Codex 会话工作目录；省略时会询问")
+    ap.add_argument("--cc-dir", help="明确指定 Claude Code 会话工作目录；省略时会询问")
+    ap.add_argument("--work-dir", help="兼容旧版，相当于 --cc-dir")
+    ap.add_argument("--add-bot", action="store_true", help="向机器人池添加 bot，复用共享 Agent 和目录")
+    ap.add_argument("--choose-chats", action="store_true", help="可选：限制本次配置的 bot 只响应选定群")
+    ap.add_argument("--reconfigure-agents", action="store_true", help="添加 bot 时也重新选择 Agent 和目录")
+    ap.add_argument("--app", help="已有机器人 app_id:app_secret；省略时会询问或扫码新建")
+    ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--installed-binary", help=argparse.SUPPRESS)
+    ap.add_argument("--no-service", action="store_true")
     args = ap.parse_args()
-
     home = Path(os.path.expanduser(args.home)).resolve()
-    bin_path = home / "bin" / "cc-connect"
-    cfg_path = home / "config.toml"
-    log_path = home / "logs" / "cc-connect.log"
+    bin_path, cfg_path, log_path = home / "bin/cc-connect", home / "config.toml", home / "logs/cc-connect.log"
+    if args.installed_binary:
+        bin_path = Path(args.installed_binary).resolve()
+        if not bin_path.is_file():
+            fail("已安装的 cc-connect 程序不存在，请重新安装后再运行 setup")
+    existing = read_config(cfg_path) if cfg_path.exists() else default_config(home)
+    data = migrate_pool(existing)
+    if existing.get("projects"):
+        say("首次把旧配置转换成机器人池，请先确认所有 bot 共用的 Agent 目录")
+        args.reconfigure_agents = True
+    skip_build = bin_path.exists() and (args.installed_binary or args.skip_build or args.add_bot)
+    if skip_build and not supports_pool(bin_path):
+        if args.installed_binary or args.skip_build:
+            fail("已安装的程序不支持机器人池，请去掉 --skip-build 更新程序")
+        say("旧程序需要升级一次以支持机器人池；之后添加 bot 会复用已安装的程序")
+        skip_build = False
 
-    step(1, "检查环境")
-    check_tools()
+    step(1, "选择 Agent 和会话目录")
+    check_tools(require_go=not skip_build)
+    prepare_agents(data, args, home)
+    check_agent_login(data["agents"])
 
-    step(2, "编译 cc-connect")
-    if args.skip_build and bin_path.exists():
-        say("跳过编译，用已有的 %s" % bin_path)
+    step(2, "准备程序")
+    if skip_build:
+        say("使用已安装的 %s" % bin_path)
     else:
         build(bin_path)
+    # 先确保程序支持新格式，再保存迁移结果；编译失败时保留可运行的旧配置。
+    write_pool_config(cfg_path, data)
 
-    step(3, "生成配置")
-    if cfg_path.exists():
-        if args.reconfigure_agents:
-            replace_agent_sections(cfg_path, pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir))
-        elif "[[projects.agents]]" not in cfg_path.read_text(encoding="utf-8"):
-            fail("已有配置是旧入口。加 --reconfigure-agents 重新选择 Agent，保留凭证和群设置")
-        say("沿用已有配置 %s" % cfg_path)
+    step(3, "配置机器人")
+    bot = select_bot(data, args.add_bot, args.app)
+    if bot is None:
+        app = choose_app(args.app)
+        if app:
+            app_id, secret = app.split(":", 1)
+            api = OpenAPI(app_id, secret)
+            api.tenant_token()  # 验证后才写入，避免错误凭证覆盖已有 bot。
+            bot = dict(next((b for b in data.get("bots", []) if b["app_id"] == app_id), {}))
+            bot.update(app_id=app_id, app_secret=secret)
+        else:
+            before = {b["app_id"] for b in data.get("bots", [])}
+            setup_bot(bin_path, cfg_path, "")
+            data = read_config(cfg_path)
+            created = [b for b in data.get("bots", []) if b["app_id"] not in before]
+            if len(created) != 1:
+                fail("无法确认新建的机器人，请检查机器人列表；没有覆盖其他机器人")
+            bot = created[0]
+    api = OpenAPI(bot["app_id"], bot["app_secret"])
+    api.tenant_token()
+
+    step(4, "检查权限和名字")
+    check_scopes(api, bot.get("owner", ""))
+    bot["name"] = check_name(api) or bot.get("name") or "你的机器人"
+
+    step(5, "保存机器人列表")
+    if args.choose_chats:
+        chats = pick_chats(api, bot["name"], bot.get("allow_chat", ""))
+        if not chats:
+            fail("没有选择群，暂不启用这个机器人")
+        bot["allow_chat"] = ",".join(chats)
     else:
-        write_config(cfg_path, home, pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir))
-        say("✅ 已生成 %s" % cfg_path)
+        bot.setdefault("allow_chat", "")
+        say("机器人配置好后再拉入群即可；由主人在群里创建会话。已有群范围限制会保留。")
+    upsert_bot(data, bot)
+    write_pool_config(cfg_path, data)
+    say("✅ 机器人池现有 %d 个 bot；全部复用同一组 Agent 配置" % len(data["bots"]))
 
-    step(4, "建飞书机器人")
-    app_id = read_option(cfg_path, "app_id")
-    if app_id and not args.app:
-        say("沿用已配置的机器人 %s" % app_id)
-    else:
-        setup_bot(bin_path, cfg_path, choose_app(args.app))
-    app_id, app_secret = read_option(cfg_path, "app_id"), read_option(cfg_path, "app_secret")
-    if not app_id or not app_secret:
-        fail("配置里没找到机器人的 app_id 和 app_secret，建机器人那一步可能没成功")
-    os.chmod(str(cfg_path), 0o600)
-    api = OpenAPI(app_id, app_secret)
-    try:
-        api.tenant_token()
-    except ApiError as e:
-        fail("机器人凭证不能用：%s" % e)
-
-    step(5, "检查权限")
-    check_scopes(api)
-
-    step(6, "检查机器人名字")
-    name = check_name(api) or "你的机器人"
-
-    step(7, "选讨论群")
-    chat_ids = pick_chats(api, name, read_option(cfg_path, "allow_chat"))
-    if chat_ids:
-        set_allow_chat(cfg_path, chat_ids)
-    else:
-        warn("没选群：机器人会在它所在的所有群里响应。之后可以重跑脚本再选")
-
-    step(8, "启动")
+    step(6, "启动或更新后台服务")
     started = start(bin_path, cfg_path, log_path, args.no_service)
-
-    say("\n🎉 配置完成。到群里做这几件事：")
-    say("  1. 选已配置的 Agent：@%s /codex-create 或 @%s /cc-create" % (name, name))
-    say("     在相应目录新建会话并绑定本群。再次创建会替换当前绑定，旧会话保留")
-    say("  2. 直接用自然语言说明分工、提问、找其他机器人讨论，不需要其他命令")
-    say("\n配置：%s" % cfg_path)
+    if started:
+        say("✅ 配置已完成，后台服务已启动。把机器人拉入飞书群后，@ 它发送 /codex-create 或 /cc-create。")
+    else:
+        say("配置已保存，但后台服务尚未启动；请按上面给出的命令启动，之后再进行群内测试。")
+    say("以后添加机器人：cc-connect setup --add-bot")
+    say("配置：%s" % cfg_path)
     if started:
         say("日志：%s" % log_path)
-        say("改了配置要重启：%s daemon restart" % bin_path)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except (ValueError, ApiError) as exc:
+        fail(str(exc))
     except KeyboardInterrupt:
         say("\n已取消")
         sys.exit(130)

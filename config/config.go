@@ -92,9 +92,11 @@ type Config struct {
 	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
 	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
 	Projects           []ProjectConfig         `toml:"projects"`
-	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Agents             []AgentConfig           `toml:"agents,omitempty"` // 全部机器人共用的 Agent 及工作目录。
+	Bots               []BotConfig             `toml:"bots,omitempty"`   // 机器人池，添加 bot 不再复制项目和 Agent 配置。
+	Commands           []CommandConfig         `toml:"commands"`         // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`          // global command aliases
+	BannedWords        []string                `toml:"banned_words"`     // messages containing any of these words are blocked
 	Log                LogConfig               `toml:"log"`
 	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
 	Speech             SpeechConfig            `toml:"speech"`
@@ -1088,6 +1090,9 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "full", "summary", "none":
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
+	}
+	if len(c.Agents) > 0 || len(c.Bots) > 0 {
+		return c.validateBotPool(permissive)
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")

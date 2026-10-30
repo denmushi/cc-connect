@@ -42,17 +42,20 @@
 
 ## 💬 本分支新增：飞书群协作
 
-一个飞书机器人可以连接本机的 Codex 和 Claude Code，每种 Agent 配置自己的会话工作目录。把机器人加入讨论群，在群里创建并绑定会话，之后直接用自然语言讨论；机器人会补读群历史，并能互相 @ 接话。
+本机配置一组共享的 Codex / Claude Code 和各自会话工作目录，再添加多个飞书机器人。把机器人加入讨论群，在群里创建并绑定会话，之后直接用自然语言讨论；机器人会补读群历史，并能互相 @ 接话。
 
-**快速上手**：需要 Go 1.25+、已登录的 Codex 或 Claude Code（可以两种都配）、飞书账号，以及已激活的 Python Conda 环境。
+**快速上手**：需要 Go 1.25+、已登录的 Codex 或 Claude Code（可以两种都配）、飞书账号，以及已激活的 Python 3.11+ Conda 环境。
 
 ```bash
 git clone https://github.com/denmushi/cc-connect.git
 cd cc-connect
-python tools/feishu-collab-setup.py
+go build -tags no_web -o cc-connect ./cmd/cc-connect
+./cc-connect setup
 ```
 
-安装向导依次询问 Agent 类型（可多选）、各自目录、机器人凭证和群范围。进入群后只有两个命令：
+**安装二进制后必须继续运行 `cc-connect setup` 完成配置。** 不要停在版本检查或“机器人尚未配置”；如果让 AI 帮忙安装，应让它逐项向你提问并继续向导，具体步骤见 [INSTALL.md](INSTALL.md)。
+
+安装向导明确询问 Agent 类型（可多选）和各自目录，显示默认路径，允许用户自定义。机器人凭证存到 bot 列表中；之后加 bot 只运行 `cc-connect setup --add-bot`，复用同一组 Agent 和同一个服务，不需要新建项目。进入群后只有两个命令：
 
 - `@你的机器人 /codex-create`：在配置的 Codex 工作目录新建会话并绑定本群。
 - `@你的机器人 /cc-create`：在配置的 Claude Code 工作目录新建会话并绑定本群。
