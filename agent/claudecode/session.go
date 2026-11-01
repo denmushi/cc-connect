@@ -288,6 +288,10 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if !disableVerbose {
 		innerArgs = append(innerArgs, "--verbose")
 	}
+	// 仅新会话设置标题；恢复时保留用户在原生客户端改过的名字。
+	if name := core.NativeSessionName(ctx); name != "" && (sessionID == "" || sessionID == core.ContinueSession || forkSession) {
+		innerArgs = append(innerArgs, "--name", name)
+	}
 
 	if mode != "" && mode != "default" {
 		innerArgs = append(innerArgs, "--permission-mode", mode)

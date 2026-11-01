@@ -205,6 +205,20 @@ func (c *collabRuntime) save(chatID string, st *collabChatState) {
 	}
 }
 
+// GroupSessionName 为原生客户端生成包含群名和机器人名的可读标题。
+func (p *Platform) GroupSessionName(msg *core.Message) string {
+	chat := strings.TrimSpace(msg.ChatName)
+	if chat == "" {
+		chat = "飞书群"
+	}
+	if p.collab == nil {
+		return chat
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return chat + " · " + p.collabSelfName(ctx)
+}
+
 // collabSelfName returns this bot's display name from /bot/v3/info (cached).
 func (p *Platform) collabSelfName(ctx context.Context) string {
 	p.collab.mu.Lock()

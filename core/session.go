@@ -61,6 +61,8 @@ type Session struct {
 	// AgentSessionID instead of resuming it in place. It clears itself as soon
 	// as the agent session ID changes (the fork reports its new ID).
 	ForkPending bool `json:"fork_pending,omitempty"`
+	// DesktopPaused 持久化桌面接管状态，重启桥接服务后也不会抢回同一会话。
+	DesktopPaused bool `json:"desktop_paused,omitempty"`
 
 	mu        sync.Mutex `json:"-"`
 	busy      bool       `json:"-"`
@@ -92,6 +94,18 @@ func (s *Session) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.busy
+}
+
+func (s *Session) IsDesktopPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.DesktopPaused
+}
+
+func (s *Session) SetDesktopPaused(paused bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DesktopPaused = paused
 }
 
 func (s *Session) Unlock(gen uint64) {
@@ -792,14 +806,19 @@ func (sm *SessionManager) deleteByIDLocked(id string) {
 
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
 func (sm *SessionManager) Save() {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	sm.saveLocked()
+	_ = sm.SaveChecked()
 }
 
-func (sm *SessionManager) saveLocked() {
+// SaveChecked 用于接管等必须确认落盘后才能继续的状态变更。
+func (sm *SessionManager) SaveChecked() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.saveLocked()
+}
+
+func (sm *SessionManager) saveLocked() error {
 	if sm.storePath == "" {
-		return
+		return nil
 	}
 
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
@@ -817,6 +836,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			ContextScope:        s.ContextScope,
+			DesktopPaused:       s.DesktopPaused,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
@@ -859,15 +879,17 @@ func (sm *SessionManager) saveLocked() {
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		slog.Error("session: failed to marshal", "error", err)
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(sm.storePath), 0o755); err != nil {
 		slog.Error("session: failed to create dir", "error", err)
-		return
+		return err
 	}
 	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
+		return err
 	}
+	return nil
 }
 
 func (sm *SessionManager) load() {

@@ -45,7 +45,9 @@ type threadStartResponse struct {
 	Model           string  `json:"model"`
 	ReasoningEffort *string `json:"reasoningEffort"`
 	Thread          struct {
-		ID string `json:"id"`
+		ID        string  `json:"id"`
+		Name      *string `json:"name"`
+		ProjectID *string `json:"projectId"`
 	} `json:"thread"`
 }
 
@@ -54,7 +56,9 @@ type threadResumeResponse struct {
 	Model           string  `json:"model"`
 	ReasoningEffort *string `json:"reasoningEffort"`
 	Thread          struct {
-		ID string `json:"id"`
+		ID        string  `json:"id"`
+		Name      *string `json:"name"`
+		ProjectID *string `json:"projectId"`
 	} `json:"thread"`
 }
 
@@ -141,18 +145,19 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	cliBin         string
-	cliExtraArgs   []string
-	url            string
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string
-	modelProvider  string
-	extraEnv       []string
-	codexHome      string
-	promptPreamble string
+	cliBin            string
+	cliExtraArgs      []string
+	url               string
+	workDir           string
+	model             string
+	effort            string
+	mode              string
+	baseURL           string
+	modelProvider     string
+	extraEnv          []string
+	codexHome         string
+	promptPreamble    string
+	nativeMetadataErr error
 
 	events chan core.Event
 
@@ -366,12 +371,18 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
+		s.syncNativeMetadata(resp.Thread.Name, resp.Thread.ProjectID)
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		return nil
 	}
 
+	params := s.threadRequestParams()
+	projectID := s.nativeProjectForStart()
+	if projectID != "" {
+		params["projectId"] = projectID
+	}
 	var resp threadStartResponse
-	if err := s.request("thread/start", s.threadRequestParams(), &resp); err != nil {
+	if err := s.request("thread/start", params, &resp); err != nil {
 		return err
 	}
 	if resp.Thread.ID == "" {
@@ -379,12 +390,18 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
+	// 创建响应可能省略 projectId；已有创建参数时无需再次查项目。
+	if projectID != "" {
+		resp.Thread.ProjectID = &projectID
+	}
+	s.syncNativeMetadata(resp.Thread.Name, resp.Thread.ProjectID)
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	return nil
 }
 
 func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
+		"cwd":                    s.GetWorkDir(),
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
 	}
@@ -990,6 +1007,8 @@ func (s *appServerSession) Close() error {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
+		// 桌面接管必须确认旧进程已退出；超时不得假装释放成功或关闭仍被写入的事件通道。
+		return fmt.Errorf("codex app-server did not exit within 2 seconds")
 	}
 
 	s.closeOnce.Do(func() {

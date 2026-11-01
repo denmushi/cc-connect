@@ -15,13 +15,15 @@ type groupTestAgent struct {
 	kind   string
 	mu     sync.Mutex
 	starts []string
+	names  []string
 }
 
 func (a *groupTestAgent) Name() string { return a.kind }
-func (a *groupTestAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
+func (a *groupTestAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.starts = append(a.starts, id)
+	a.names = append(a.names, NativeSessionName(ctx))
 	if id == "" {
 		id = fmt.Sprintf("%s-%d", a.kind, len(a.starts))
 	}
@@ -79,6 +81,11 @@ func TestGroupAgentsCreateRouteAndRestart(t *testing.T) {
 	}
 	send("group-a", "/codex-create")
 	old := waitGroupTurn(t, e, "group-a")
+	codex.mu.Lock()
+	if codex.names[0] != "群聊会话 · Codex" {
+		t.Errorf("native title was not passed: %q", codex.names[0])
+	}
+	codex.mu.Unlock()
 	send("group-b", "/cc-create")
 	other := waitGroupTurn(t, e, "group-b")
 	send("group-a", "/cc-create")

@@ -103,6 +103,10 @@ func (e *Engine) handleGroupAgentEntry(p Platform, msg *Message) bool {
 	}
 	name := map[string]string{"/codex-create": "codex", "/cc-create": "claudecode"}[command]
 	if name == "" {
+		if _, sm := r.context(msg.SessionKey); sm != nil && sm.GetOrCreateActive(msg.SessionKey).IsDesktopPaused() {
+			e.reply(p, msg.ReplyCtx, "这条会话已暂停飞书接收并交给原生客户端。关闭原生会话后，请在本机运行 cc-connect desktop resume <会话ID> 恢复。")
+			return true
+		}
 		if strings.HasPrefix(command, "/") || strings.HasPrefix(command, "!") {
 			e.reply(p, msg.ReplyCtx, "当前仅支持创建会话命令。"+r.hint())
 			return true
@@ -136,7 +140,16 @@ func (e *Engine) handleGroupAgentEntry(p Platform, msg *Message) bool {
 	}
 	e.cleanupInteractiveState(msg.SessionKey)
 	sm := r.sessions[name]
-	session := sm.NewSession(msg.SessionKey, "群聊会话")
+	label := map[string]string{"codex": "Codex", "claudecode": "Claude Code"}[name]
+	title := strings.TrimSpace(msg.ChatName)
+	if namer, ok := p.(GroupSessionNamer); ok {
+		title = namer.GroupSessionName(msg)
+	}
+	if title == "" {
+		title = "群聊会话"
+	}
+	session := sm.NewSession(msg.SessionKey, title+" · "+label)
+	sm.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	session.ContextScope = name
 	sm.Save()
 	// 创建命令触发一个最小真实回合，使 Agent 原生会话落盘，而不只创建桥接层占位。
@@ -145,7 +158,6 @@ func (e *Engine) handleGroupAgentEntry(p Platform, msg *Message) bool {
 		return true
 	}
 	copy := *msg
-	label := map[string]string{"codex": "Codex", "claudecode": "Claude Code"}[name]
 	copy.Content = "这是主人刚通过 " + command + " 创建并绑定的全新群聊会话。不要执行群历史中的旧任务，不调用工具。只回复一句：已创建并绑定新的 " + label + " 会话，可以直接开始交流。"
 	go e.processInteractiveMessageWith(p, &copy, session, r.agents[name], sm, msg.SessionKey, "", msg.SessionKey, gen)
 	return true

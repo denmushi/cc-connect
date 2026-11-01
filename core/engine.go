@@ -4356,13 +4356,14 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 // startOrForkAgentSession resumes startSessionID, or forks it when the session
 // was bound with /fork and the agent supports forking.
 func (e *Engine) startOrForkAgentSession(agent Agent, session *Session, startSessionID string) (AgentSession, error) {
+	ctx := nativeSessionContext(e.ctx, session)
 	if startSessionID != "" && session.IsForkPending() {
 		if forker, ok := agent.(SessionForker); ok {
 			slog.Info("forking agent session", "source_session_id", startSessionID)
-			return forker.StartForkedSession(e.ctx, startSessionID)
+			return forker.StartForkedSession(ctx, startSessionID)
 		}
 	}
-	return agent.StartSession(e.ctx, startSessionID)
+	return agent.StartSession(ctx, startSessionID)
 }
 
 // withAgentContext puts platform-provided context (AgentContextProvider) in
@@ -4541,7 +4542,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = agent.StartSession(nativeSessionContext(e.ctx, session), "")
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
