@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from agent_runtime import configured_argv
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -67,12 +68,29 @@ def configure_agents(data, directories):
         elif kind == "codex":
             agent = {"type": kind, "options": {"backend": "app_server", "mode": "suggest"}}
         else:
-            agent = {"type": kind, "options": {"mode": "dontAsk",
-                     "disallowed_tools": ["Bash", "Edit", "Write", "NotebookEdit"],
-                     "cmd": "claude --strict-mcp-config"}}
+            # 使用 CLI 已配置的 MCP/Skills，工具调用仍走常规权限审批。
+            agent = {"type": kind, "options": {"mode": "default", "cmd": "claude"}}
         agent.setdefault("options", {})["work_dir"] = directory
         agents.append(agent)
     data["agents"] = agents
+
+
+def restore_generated_tool_defaults(data):
+    """仅清理与旧向导默认值完全一致的限制组合，其余 MCP 和权限设置保留。"""
+    changed = []
+    for agent in data.get("agents", []):
+        if agent.get("type") != "claudecode":
+            continue
+        options = agent.get("options", {})
+        argv = configured_argv(options)
+        if (options.get("mode") == "dontAsk"
+                and options.get("disallowed_tools") == ["Bash", "Edit", "Write", "NotebookEdit"]
+                and len(argv) == 2 and argv[1] == "--strict-mcp-config"):
+            options["cmd"] = [argv[0]]
+            options["mode"] = "default"
+            del options["disallowed_tools"]
+            changed.append(agent["type"])
+    return changed
 
 
 def upsert_bot(data, bot):

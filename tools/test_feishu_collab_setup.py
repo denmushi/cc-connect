@@ -69,7 +69,9 @@ class SetupTest(unittest.TestCase):
                 self.assertEqual(first["agents"][0]["options"]["cli_source"], "cli")
                 self.assertEqual(first["agents"][0]["options"]["cmd"], [cli])
                 self.assertEqual(first["agents"][1]["options"]["cli_source"], "desktop")
-                self.assertEqual(first["agents"][1]["options"]["cmd"], [desktop, "--strict-mcp-config"])
+                self.assertEqual(first["agents"][1]["options"]["cmd"], [desktop])
+                self.assertEqual(first["agents"][1]["options"]["mode"], "default")
+                self.assertNotIn("disallowed_tools", first["agents"][1]["options"])
                 with patch.object(sys, "argv", ["setup", "--home", str(home), "--add-bot", "--no-service"]), \
                      patch("builtins.input", side_effect=AssertionError("adding a bot must reuse Agent directories")), \
                      patch.object(setup, "choose_app", return_value="cli_second:TEST_PLACEHOLDER_B"):
@@ -243,6 +245,24 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(agent_runtime.configured_argv({"cmd": ["/path with spaces/cli", "--flag"],
                                                        "cli_path": "obsolete --old"}),
                          ["/path with spaces/cli", "--flag"])
+
+    def test_restore_only_generated_tool_limits(self):
+        old = {"type": "claudecode", "options": {
+            "cmd": ["/chosen custom path/claude-cli", "--strict-mcp-config"], "cli_source": "custom",
+            "mode": "dontAsk", "disallowed_tools": ["Bash", "Edit", "Write", "NotebookEdit"],
+            "work_dir": "/chosen/work", "env": {"CLAUDE_CONFIG_DIR": "/chosen/settings"}}}
+        custom = copy.deepcopy(old)
+        custom["options"]["cmd"].extend(["--mcp-config", "/chosen/mcp.json"])
+        before = copy.deepcopy(custom)
+        data = {"agents": [old, custom], "bots": [{"app_id": "cli_fixture"}]}
+        self.assertEqual(collab_config.restore_generated_tool_defaults(data), ["claudecode"])
+        self.assertEqual(old["options"]["cmd"], ["/chosen custom path/claude-cli"])
+        self.assertEqual(old["options"]["mode"], "default")
+        self.assertNotIn("disallowed_tools", old["options"])
+        self.assertEqual(old["options"]["env"], {"CLAUDE_CONFIG_DIR": "/chosen/settings"})
+        self.assertEqual(old["options"]["cli_source"], "custom")
+        self.assertEqual(custom, before)
+        self.assertEqual(collab_config.restore_generated_tool_defaults(data), [])
 
 
 if __name__ == "__main__":

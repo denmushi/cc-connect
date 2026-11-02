@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -23,17 +24,17 @@ func TestNewCollabRuntime(t *testing.T) {
 		t.Fatalf("collab should be off by default")
 	}
 	c := newCollabRuntime(map[string]any{
-		"collab": true, "collab_initial_history": int64(50), "collab_max_bot_turns": int64(3),
+		"collab": true, "collab_max_bot_turns": int64(3),
 		"cc_data_dir": "/tmp/x", "cc_project": "p1",
 	})
-	if c == nil || c.initialHistory != 50 || c.maxBotTurns != 3 {
+	if c == nil || c.maxBotTurns != 3 {
 		t.Fatalf("unexpected runtime: %+v", c)
 	}
 	if !strings.HasSuffix(c.stateDir, "feishu-collab/p1") {
 		t.Fatalf("state dir = %q", c.stateDir)
 	}
 	d := newCollabRuntime(map[string]any{"collab": true})
-	if d.initialHistory != collabDefaultInitialHistory || d.maxBotTurns != collabDefaultMaxBotTurns || d.stateDir != "" {
+	if d.maxBotTurns != collabDefaultMaxBotTurns || d.stateDir != "" {
 		t.Fatalf("defaults not applied: %+v", d)
 	}
 }
@@ -57,26 +58,23 @@ func TestCollabRenderReply_MentionsBecomeCardAts(t *testing.T) {
 		"张三":       {openID: "ou_zhang"},
 		"Claude-B": {openID: "ou_b", isBot: true},
 	}
-	got := collabRenderReply("方案见上。@张三 @Claude-B 请评估", targets, 0, 6, "ou_asker")
+	got := collabRenderReply("方案见上。@张三 @Claude-B 请评估", targets)
 	want := "方案见上。<at id=ou_zhang></at> <at id=ou_b></at> 请评估"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-func TestCollabRenderReply_AddsOwnerOfMentionedBot(t *testing.T) {
+func TestCollabRenderReply_PreservesAgentChosenMentions(t *testing.T) {
 	targets := map[string]collabMentionTarget{
 		"张三":       {openID: "ou_zhang"},
 		"Claude-B": {openID: "ou_b", isBot: true, owner: "张三"},
 	}
-	if got := collabRenderReply("@Claude-B 请看，@Claude-B 再补充", targets, 0, 6, ""); got != "<at id=ou_zhang></at> <at id=ou_b></at> 请看，<at id=ou_b></at> 再补充" {
-		t.Fatalf("owner should be added once before the bot: %q", got)
+	if got := collabRenderReply("@Claude-B 请看，@Claude-B 再补充", targets); got != "<at id=ou_b></at> 请看，<at id=ou_b></at> 再补充" {
+		t.Fatalf("bridge added someone the agent did not mention: %q", got)
 	}
-	if got := collabRenderReply("@张三 @Claude-B 请看", targets, 0, 6, ""); got != "<at id=ou_zhang></at> <at id=ou_b></at> 请看" {
-		t.Fatalf("owner already mentioned must not repeat: %q", got)
-	}
-	if got := collabRenderReply("@Claude-B 请看", targets, 5, 6, "ou_asker"); strings.Contains(got, "ou_zhang") || strings.Contains(got, "ou_b") {
-		t.Fatalf("at the loop limit neither the bot nor its owner is added: %q", got)
+	if got := collabRenderReply("@张三 @Claude-B 请看", targets); got != "<at id=ou_zhang></at> <at id=ou_b></at> 请看" {
+		t.Fatalf("original mentions changed: %q", got)
 	}
 }
 
@@ -86,8 +84,8 @@ func TestCollabRenderReply_IgnoresMentionsInCode(t *testing.T) {
 		"Claude-B": {openID: "ou_b", isBot: true, owner: "张三"},
 	}
 	in := "我们写的 `@Claude-B` 是靠名字匹配：\n```\n@张三 @Claude-B\n```\n@Claude-B 请回应"
-	want := "我们写的 `@Claude-B` 是靠名字匹配：\n```\n@张三 @Claude-B\n```\n<at id=ou_zhang></at> <at id=ou_b></at> 请回应"
-	if got := collabRenderReply(in, targets, 0, 6, ""); got != want {
+	want := "我们写的 `@Claude-B` 是靠名字匹配：\n```\n@张三 @Claude-B\n```\n<at id=ou_b></at> 请回应"
+	if got := collabRenderReply(in, targets); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }
@@ -97,31 +95,42 @@ func TestCollabRenderReply_LongestNameFirst(t *testing.T) {
 		"Claude":   {openID: "ou_short", isBot: true},
 		"Claude-B": {openID: "ou_long", isBot: true},
 	}
-	got := collabRenderReply("@Claude-B 和 @Claude", targets, 0, 6, "")
+	got := collabRenderReply("@Claude-B 和 @Claude", targets)
 	if got != "<at id=ou_long></at> 和 <at id=ou_short></at>" {
 		t.Fatalf("got %q", got)
 	}
 }
 
-func TestCollabRenderReply_LoopLimitDropsBotMentions(t *testing.T) {
-	targets := map[string]collabMentionTarget{
-		"张三":       {openID: "ou_zhang"},
-		"Claude-B": {openID: "ou_b", isBot: true},
+func TestCollabRenderReply_PlainTextUnchanged(t *testing.T) {
+	input := "你好\n\n**结论**：保持原文。"
+	if got := collabRenderReply(input, map[string]collabMentionTarget{"成员": {openID: "ou_member"}}); got != input {
+		t.Fatalf("reply was decorated: %q", got)
 	}
-	// Five bot messages already; this reply would be the sixth (the limit).
-	got := collabRenderReply("@张三 @Claude-B 继续", targets, 5, 6, "ou_asker")
-	if strings.Contains(got, "ou_b") {
-		t.Fatalf("bot mention should be dropped at the limit: %q", got)
+}
+
+func TestCollabHumanMessageForwardedWithoutContextFetch(t *testing.T) {
+	// 故意不配置 API client：普通消息转发不应为了构造 query 查询飞书历史。
+	p := &Platform{platformName: "feishu", botOpenID: "ou_self", collab: newCollabRuntime(map[string]any{
+		"collab": true, "collab_create_only": true, "collab_owner": "ou_owner",
+	})}
+	p.chatNameCache.Store("oc_test", "测试")
+	p.collab.members.Store("oc_test", &collabMembersEntry{names: map[string]string{"提问人": "ou_owner"}, fetchedAt: time.Now()})
+	var forwarded string
+	p.handler = func(platform core.Platform, msg *core.Message) {
+		forwarded = msg.Content
+		if provider, ok := platform.(core.AgentContextProvider); ok {
+			if extra := provider.AgentContext(msg.ReplyCtx, "codex:s1"); extra != "" {
+				t.Fatalf("bridge injected context: %q", extra)
+			}
+		}
 	}
-	if !strings.Contains(got, "<at id=ou_zhang></at>") || !strings.Contains(got, "Claude-B 继续") {
-		t.Fatalf("human mention and bot name text should stay: %q", got)
-	}
-	if !strings.Contains(got, "已连续发言 6 次") || !strings.Contains(got, "<at id=ou_asker></at>") {
-		t.Fatalf("loop note should ask the last human: %q", got)
-	}
-	// Below the limit nothing is dropped.
-	if got := collabRenderReply("@Claude-B 继续", targets, 4, 6, "ou_asker"); got != "<at id=ou_b></at> 继续" {
-		t.Fatalf("below limit got %q", got)
+	text := "你好\n\n请结合前面的讨论回答。"
+	body, _ := json.Marshal(map[string]string{"text": "@_user_1 " + text})
+	p.collabDispatch(context.Background(), "text", string(body), []*larkim.MentionEvent{{
+		Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_self")}, Name: strPtr("Bot-A"),
+	}}, "om_test", "feishu:oc_test", "ou_owner", "user", "oc_test", replyContext{chatID: "oc_test", messageID: "om_test"}, 1000)
+	if forwarded != text {
+		t.Fatalf("query changed: %q", forwarded)
 	}
 }
 
@@ -297,26 +306,6 @@ func TestCollabScan_NewConversationIncludesOwnMessages(t *testing.T) {
 	}
 }
 
-func TestCollabContext_RosterRulesAndTruncation(t *testing.T) {
-	st := newTestCollabState()
-	st.Role = "负责后端"
-	st.Owner = "李四"
-	st.Roster["cli_a"] = &collabRosterEntry{Name: "Claude-A", Owner: "李四", Role: "负责后端"}
-	st.Roster["cli_b"] = &collabRosterEntry{Name: "Claude-B", Owner: "张三", Role: "负责工具服务"}
-	long := strings.Repeat("长", collabMaxTranscriptChars/3)
-	lines := []string{"[01-01 10:00] 甲（人）：" + long, "[01-01 10:01] 乙（人）：" + long, "[01-01 10:02] 丙（人）：最新一条"}
-	got := collabContext("Claude-A", "测试", st, lines, 2, 6, "cli_a", true)
-
-	for _, want := range []string{"「Claude-A」", "群「测试」", "定位：负责后端", "Claude-B（主人：张三；定位：负责工具服务）", "已连续发言 2 次（上限 6 次", "丙（人）：最新一条", "已省略", "[@ 你的消息]"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("context missing %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "- Claude-A（") {
-		t.Fatalf("self must not be listed as a peer:\n%s", got)
-	}
-}
-
 func TestCollabCardKeepsAtTags(t *testing.T) {
 	body := buildCardJSON("**结论**\n\n<at id=ou_zhang></at> <at id=ou_b></at> 请确认")
 	var card struct {
@@ -441,7 +430,7 @@ func TestCollabDirectoryDiscoveryWithoutRole(t *testing.T) {
 	if peer == nil || peer.OpenID != "ou_peer" || peer.Role != "" {
 		t.Fatalf("missing unregistered bot: %+v", peer)
 	}
-	text := collabRenderReply("@Peer 请复核", map[string]collabMentionTarget{"Peer": {openID: peer.OpenID, isBot: true}}, 0, 6, "")
+	text := collabRenderReply("@Peer 请复核", map[string]collabMentionTarget{"Peer": {openID: peer.OpenID, isBot: true}})
 	if !strings.Contains(text, "<at id=ou_peer>") {
 		t.Fatalf("not a real mention: %s", text)
 	}

@@ -94,7 +94,13 @@ cc-connect desktop repair <Codex会话ID>
 
 自动打开目前支持 macOS；其他系统、隔离用户、CLI 参数包装器需要手动移交，命令会在暂停前拒绝。Claude Desktop 的命令通过 PTY 启动，满足其交互终端要求。桌面接管不是双方同时操作：结束桌面里的会话后再运行 `resume`，飞书下一条消息才恢复同一原生 ID。
 
-机器人通过群成员接口识别同伴，补读群历史后发 Markdown 卡片，需要交接时转换成真正的 @。没有人插话时，机器人连续发言默认最多 6 条。再次创建会话后重新读取最近 200 条群消息。
+普通消息只把用户原话传给 Agent，不再追加角色、主人、协作规则、成员名单或历史模板。例如群里发「你好」，原生会话收到的普通 query 就是「你好」。创建命令仍使用一次简短的初始化确认，避免执行旧任务。
+
+上下文由会话使用自己已有的飞书工具按需查询，例如用户已经配置在所选 CLI 中的飞书 MCP、Skill 或 lark-cli。cc-connect 不新增查询工具、不代理 Agent 的飞书查询，也不注入额外 MCP 配置。工具配置、登录和权限属于会话所在的 CLI 环境；原有 `CC_SESSION_KEY` 等路由环境变量保留，消息正文不额外拼接指令。角色和分工继续通过自然语言表达。
+
+回复仍以 Markdown 卡片发送，原文中的 @ 名字会转换成真实提及，不自动补 @ 主人或追加协作话术。没有人插话时，机器人连续发言默认最多 6 条；接收端防循环只决定是否继续触发 Agent，不改写回复。普通人类消息不预拉历史；旧的 `collab_initial_history` 不再触发自动补读。已有原生会话中的旧模板记录不会被改写，新版本只影响之后发送的消息。
+
+新向导使用 Claude Code 的常规审批模式，不再默认设置 `--strict-mcp-config` 或禁用 Bash 等工具，确保 CLI 已有的飞书工具可按自身权限运行。重新运行向导时会清理旧向导生成的完整默认限制组合，保留程序来源、目录、环境变量和自定义 MCP/权限配置；不会替用户安装工具、登录飞书或开启免审批权限。
 
 ## 配置结构
 
@@ -112,10 +118,9 @@ cmd = ["/path/to/standalone/codex"]
 type = "claudecode"
 [agents.options]
 work_dir = "/path/chosen/by/user/claude"
-mode = "dontAsk"
-disallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]
+mode = "default"
 cli_source = "desktop"
-cmd = ["/path/to/desktop/bundled/claude", "--strict-mcp-config"]
+cmd = ["/path/to/desktop/bundled/claude"]
 
 [[bots]]
 name = "我的机器人 A"
@@ -133,7 +138,7 @@ app_secret = "<your-secret-b>"
 ## 运行边界
 
 - 创建和审批仅机器人主人可操作，其他群成员可以自然语言交流。
-- 默认 Claude Code 不可写文件或执行命令，不加载个人 MCP；Codex 使用只读文件沙箱，仍可能运行只读命令，个人 MCP 是否启用由 Codex 本机设置决定。
+- Claude Code 使用常规权限审批并加载已有工具配置；Codex 使用只读文件沙箱，个人 MCP 是否启用由 Codex 本机设置决定。cc-connect 不为会话额外授权飞书操作。
 - 多机器人讨论需要各机器人开通接收其他机器人 @、读取群消息、读取群成员和发消息权限，安装向导会检查。
 - 会话和模型在每个人自己的电脑上运行，电脑睡眠、关机或进程退出后机器人离线。
 - 同一台电脑的多个 bot 共用一个后台服务，不需要再次安装服务或创建另一个 `--home`。

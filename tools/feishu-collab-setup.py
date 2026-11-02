@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 from collab_config import (configure_agents, default_config, migrate_pool, read_config,
-                           upsert_bot, write_config as write_pool_config)
+                           restore_generated_tool_defaults, upsert_bot, write_config as write_pool_config)
 from agent_runtime import (SOURCE_LABELS, configured_argv, discover_executables,
                            executable_source, resolve_executable)
 
@@ -469,6 +469,8 @@ def select_bot(data, add=False, credentials=None):
 
 
 def prepare_agents(data, args, home):
+    if restore_generated_tool_defaults(data):
+        say("已移除旧向导添加的 Claude Code 工具限制，使用既有工具配置和常规权限审批。")
     current = {a["type"]: a.get("options", {}).get("work_dir", "") for a in data.get("agents", [])}
     if args.add_bot and current and not args.reconfigure_agents:
         for kind, directory in current.items():

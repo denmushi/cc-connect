@@ -2,8 +2,8 @@ package feishu
 
 // Group collaboration mode ("collab"): several people's coding-agent bots
 // discuss in one Feishu group. When a bot is @-mentioned (by a person or by
-// another bot) it first pulls every group message since its previous turn,
-// replies with a Markdown card, and may hand the discussion over by
+// another bot) it forwards the original message; history is queried by the agent
+// only when needed. It replies with a Markdown card and may hand discussion over by
 // @-mentioning people and their bots inside that card. Feishu delivers <at>
 // tags inside bot-sent cards to the mentioned bot, so no extra plain-text
 // message is needed. A loop guard stops bot-to-bot hand-offs once too many
@@ -32,20 +32,17 @@ import (
 )
 
 const (
-	collabDefaultInitialHistory = 200
-	collabDefaultMaxBotTurns    = 6
-	collabMaxIncrementalFetch   = 500   // safety cap for one incremental pull
-	collabMaxMessageChars       = 4000  // per message in the transcript
-	collabMaxTranscriptChars    = 80000 // whole transcript; oldest lines are dropped first
-	collabPageSize              = 50
+	collabDefaultMaxBotTurns  = 6
+	collabMaxIncrementalFetch = 500  // safety cap for one incremental pull
+	collabMaxMessageChars     = 4000 // per message in the transcript
+	collabPageSize            = 50
 )
 
 // collabRuntime holds collab settings and per-chat state for one platform.
 type collabRuntime struct {
-	createOnly     bool
-	initialHistory int
-	maxBotTurns    int
-	stateDir       string // empty = keep state in memory only
+	createOnly  bool
+	maxBotTurns int
+	stateDir    string // empty = keep state in memory only
 
 	mu        sync.Mutex
 	chats     map[string]*collabChatState
@@ -100,10 +97,9 @@ func newCollabRuntime(opts map[string]any) *collabRuntime {
 		return nil
 	}
 	c := &collabRuntime{
-		initialHistory: collabIntOpt(opts, "collab_initial_history", collabDefaultInitialHistory),
-		maxBotTurns:    collabIntOpt(opts, "collab_max_bot_turns", collabDefaultMaxBotTurns),
-		chats:          make(map[string]*collabChatState),
-		chatLocks:      make(map[string]*sync.Mutex),
+		maxBotTurns: collabIntOpt(opts, "collab_max_bot_turns", collabDefaultMaxBotTurns),
+		chats:       make(map[string]*collabChatState),
+		chatLocks:   make(map[string]*sync.Mutex),
 	}
 	c.ownerID, _ = opts["collab_owner"].(string)
 	c.createOnly, _ = opts["collab_create_only"].(bool)
@@ -635,60 +631,6 @@ func collabLoopWindow(maxBotTurns int) int {
 	return min(max(maxBotTurns+5, 20), collabPageSize)
 }
 
-// AgentContext implements core.AgentContextProvider: in collab mode it puts
-// the group messages the agent has not seen yet in front of the message.
-func (p *Platform) AgentContext(replyCtx any, conversationID string) string {
-	rc, ok := replyCtx.(replyContext)
-	if !ok || p.collab == nil || !rc.collab {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return p.collabContextFor(ctx, rc, conversationID)
-}
-
-// collabContextFor pulls the group messages this conversation has not seen
-// and builds the text put in front of the triggering message. A new
-// conversation (conversationID changed) catches up from the latest messages.
-func (p *Platform) collabContextFor(ctx context.Context, rc replyContext, conversationID string) string {
-	c := p.collab
-	unlock := c.lockChat(rc.chatID)
-	defer unlock()
-	st := c.load(rc.chatID)
-	prevConversation, prevWatermark := st.ConversationID, st.WatermarkMs
-	collabEnterConversation(st, conversationID)
-	selfName := p.collabSelfName(ctx)
-
-	incremental := st.WatermarkMs > 0
-	msgs, err := p.collabFetchMessages(ctx, rc.chatID, st.WatermarkMs, c.initialHistory)
-	if err != nil {
-		slog.Warn(p.tag()+": collab history pull failed; replying without it", "chat_id", rc.chatID, "error", err)
-		// Keep the old position so the next turn catches up again.
-		st.ConversationID, st.WatermarkMs = prevConversation, prevWatermark
-		return collabContext(selfName, p.resolveChatName(rc.chatID), st, nil, rc.collabBotTurns, c.maxBotTurns, p.appID, incremental)
-	}
-	humanNames := make(map[string]string)
-	for name, id := range p.collabMembers(ctx, rc.chatID) {
-		if id != "" {
-			humanNames[id] = name
-		}
-	}
-	p.collabDiscoverBots(rc.chatID, st)
-	if st.Owner == "" {
-		ownerID := p.collabOwnerID(ctx)
-		st.Owner = humanNames[ownerID]
-		if st.Owner == "" {
-			st.Owner = ownerID
-		}
-	}
-	lines := collabScan(st, msgs, rc.messageID, p.getBotOpenID(), p.appID, incremental, humanNames)
-	if rc.collabTriggerMs > st.WatermarkMs {
-		st.WatermarkMs = rc.collabTriggerMs
-	}
-	c.save(rc.chatID, st)
-	return collabContext(selfName, p.resolveChatName(rc.chatID), st, lines, rc.collabBotTurns, c.maxBotTurns, p.appID, incremental)
-}
-
 // collabEnterConversation points the chat state at conversationID. A new
 // conversation (/new, /switch, /fork, idle rotation) has seen none of the
 // group yet, so it reads the latest messages from scratch.
@@ -771,70 +713,6 @@ func collabTranscriptLine(m collabMsg, text string, isBot bool, selfAppID string
 	return fmt.Sprintf("[%s] %s：%s", ts, who, collabTruncate(strings.TrimSpace(text), collabMaxMessageChars))
 }
 
-// collabContext builds the text prepended to the agent's input.
-func collabContext(selfName, chatName string, st *collabChatState, lines []string, botTurns, maxBotTurns int, selfAppID string, incremental bool) string {
-	var b strings.Builder
-	group := "飞书群"
-	if chatName != "" {
-		group = "飞书群「" + chatName + "」"
-	}
-	owner := st.Owner
-	if owner == "" {
-		owner = "未设置"
-	}
-	role := st.Role
-	if role == "" {
-		role = "按群内自然语言和当前会话确定"
-	}
-	fmt.Fprintf(&b, "[群协作] 你是%s里的 AI 助手「%s」，主人：%s，定位：%s。\n", group, selfName, owner, role)
-
-	var peers []*collabRosterEntry
-	for appID, e := range st.Roster {
-		if appID != selfAppID {
-			peers = append(peers, e)
-		}
-	}
-	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
-	b.WriteString("群里登记过的其他 AI 助手：\n")
-	if len(peers) == 0 {
-		b.WriteString("- （暂无已识别的其他助手）\n")
-	}
-	for _, e := range peers {
-		fmt.Fprintf(&b, "- %s（主人：%s；定位：%s）\n", e.Name, e.Owner, e.Role)
-	}
-	b.WriteString("发言规则：\n")
-	b.WriteString("1. 先看下面的群消息，再回复最后这条 @ 你的消息；用 Markdown 写。\n")
-	b.WriteString("2. 需要别人参与时，在回复末尾同时 @人名 和 @他的 AI 助手名（只能用群成员和上面列出的名字，可以同时找几个人）。\n")
-	b.WriteString("3. 讨论有结论或需要人拍板时，只 @ 提问的人做总结，不要再 @ 任何 AI 助手。\n")
-	b.WriteString("4. 不要在群里贴密钥、密码、token 等敏感信息。\n")
-	fmt.Fprintf(&b, "当前 AI 助手之间已连续发言 %d 次（上限 %d 次，到上限后不能再 @ AI 助手）。\n\n", botTurns, maxBotTurns)
-
-	if incremental {
-		fmt.Fprintf(&b, "[你上次发言之后的群消息，共 %d 条]\n", len(lines))
-	} else {
-		fmt.Fprintf(&b, "[最近的群消息，共 %d 条]\n", len(lines))
-	}
-	if len(lines) == 0 {
-		b.WriteString("（没有新消息）\n")
-	}
-	// Keep the newest lines when the transcript is too long.
-	total := 0
-	start := len(lines)
-	for start > 0 && total+len(lines[start-1]) <= collabMaxTranscriptChars {
-		start--
-		total += len(lines[start]) + 1
-	}
-	if start > 0 {
-		fmt.Fprintf(&b, "（更早的 %d 条太长，已省略）\n", start)
-	}
-	for _, l := range lines[start:] {
-		b.WriteString(l)
-		b.WriteByte('\n')
-	}
-	b.WriteString("\n[@ 你的消息]")
-	return b.String()
-}
-
 // collabInboundText extracts the user text of a group message that mentioned
 // the bot. ok is false for message types collab does not handle.
 func (p *Platform) collabInboundText(msgType, content string, mentions []*larkim.MentionEvent) (string, bool) {
@@ -907,6 +785,7 @@ func collabEventCardText(content string, mentions []*larkim.MentionEvent, selfOp
 // collabDispatch handles a group message that mentioned the bot in collab mode.
 func (p *Platform) collabDispatch(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, senderType, chatID string, rctx replyContext, createTimeMs int64) {
 	fromBot := senderType != "" && senderType != "user"
+	rctx.collab = true
 
 	text, ok := p.collabInboundText(msgType, content, mentions)
 	if !ok {
@@ -926,13 +805,16 @@ func (p *Platform) collabDispatch(ctx context.Context, msgType, content string, 
 		return
 	}
 
-	// Count the bot-to-bot chain now; the group history itself is read when
-	// the message reaches the agent (AgentContext), so it is never stale.
-	recent, err := p.collabFetchMessages(ctx, chatID, 0, collabLoopWindow(p.collab.maxBotTurns))
-	if err != nil {
-		slog.Warn(p.tag()+": collab loop check failed; treating the chain as new", "chat_id", chatID, "error", err)
+	// 人类消息重置连续轮数；只有机器人接话才读取有限历史做防循环检查。
+	botTurns, askerID := 0, userID
+	if fromBot {
+		recent, err := p.collabFetchMessages(ctx, chatID, 0, collabLoopWindow(p.collab.maxBotTurns))
+		if err != nil {
+			slog.Warn(p.tag()+": collab loop check failed", "chat_id", chatID, "error", err)
+			return // 无法确认链长时不继续机器人互相触发。
+		}
+		botTurns, askerID = collabLoopState(recent, collabTrigger{id: messageID, userID: userID, createMs: createTimeMs, fromBot: true})
 	}
-	botTurns, askerID := collabLoopState(recent, collabTrigger{id: messageID, userID: userID, createMs: createTimeMs, fromBot: fromBot})
 	if fromBot && botTurns >= p.collab.maxBotTurns {
 		slog.Info(p.tag()+": collab loop limit reached; ignoring bot mention", "chat_id", chatID, "message_id", messageID, "bot_turns", botTurns)
 		return
@@ -1105,11 +987,10 @@ type collabMentionTarget struct {
 	owner  string // for bots: the owner's display name from the roster
 }
 
-// collabSend renders an agent reply as a Markdown card, turning @names into
-// card mentions and applying the loop guard.
+// collabSend 只转换飞书卡片和 @ 格式，发言内容由 Agent 决定。
 func (p *Platform) collabSend(ctx context.Context, rc replyContext, content string) error {
 	targets := p.collabTargets(ctx, rc.chatID)
-	content = collabRenderReply(content, targets, rc.collabBotTurns, p.collab.maxBotTurns, rc.collabAskerID)
+	content = collabRenderReply(content, targets)
 	body := buildCardJSON(content)
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, body)
@@ -1144,11 +1025,8 @@ func (p *Platform) collabTargets(ctx context.Context, chatID string) map[string]
 	return targets
 }
 
-// collabRenderReply replaces @name with card <at> tags. A mentioned bot's
-// owner is mentioned too when the reply does not already do so. Once the next
-// bot message would reach the loop limit, bot mentions are dropped and the
-// last human speaker is asked to decide instead.
-func collabRenderReply(content string, targets map[string]collabMentionTarget, botTurns, maxBotTurns int, askerID string) string {
+// 仅转换 Agent 原文已有的提及，不自动添加主人或协作提示；防循环在接收端处理。
+func collabRenderReply(content string, targets map[string]collabMentionTarget) string {
 	if !strings.Contains(content, "@") || len(targets) == 0 {
 		return content
 	}
@@ -1165,10 +1043,6 @@ func collabRenderReply(content string, targets map[string]collabMentionTarget, b
 		codes = append(codes, code)
 		return fmt.Sprintf("\x00c%d\x00", len(codes)-1)
 	})
-	original := content
-	limitReached := botTurns+1 >= maxBotTurns
-	droppedBots := false
-	addedOwners := make(map[string]bool)
 	// Replace longest names first; placeholders keep shorter names from
 	// matching inside an already-replaced tag.
 	placeholders := make(map[string]string)
@@ -1179,20 +1053,7 @@ func collabRenderReply(content string, targets map[string]collabMentionTarget, b
 		}
 		t := targets[name]
 		ph := fmt.Sprintf("\x00%d\x00", i)
-		if t.isBot && limitReached {
-			placeholders[ph] = name
-			droppedBots = true
-			content = strings.ReplaceAll(content, pattern, ph)
-			continue
-		}
 		placeholders[ph] = fmt.Sprintf("<at id=%s></at>", t.openID)
-		if owner, ok := targets[t.owner]; t.isBot && ok && !owner.isBot &&
-			!addedOwners[t.owner] && !strings.Contains(original, "@"+t.owner) {
-			addedOwners[t.owner] = true
-			withOwner := fmt.Sprintf("\x00o%d\x00", i)
-			placeholders[withOwner] = fmt.Sprintf("<at id=%s></at> <at id=%s></at>", owner.openID, t.openID)
-			content = strings.Replace(content, pattern, withOwner, 1)
-		}
 		content = strings.ReplaceAll(content, pattern, ph)
 	}
 	for ph, repl := range placeholders {
@@ -1200,14 +1061,6 @@ func collabRenderReply(content string, targets map[string]collabMentionTarget, b
 	}
 	for i, code := range codes {
 		content = strings.Replace(content, fmt.Sprintf("\x00c%d\x00", i), code, 1)
-	}
-	if droppedBots {
-		// No "> " quote here: Feishu drops the blank line before it in cards.
-		note := fmt.Sprintf("\n\n⏸ **AI 助手之间已连续发言 %d 次，先暂停自动交接。**", botTurns+1)
-		if askerID != "" {
-			note += fmt.Sprintf("<at id=%s></at> 请看一下要不要继续。", askerID)
-		}
-		content += note
 	}
 	return content
 }
