@@ -323,17 +323,27 @@ func (s *Session) GetActiveProvider() string {
 // When the existing ID is replaced or cleared, it is saved to PastAgentSessionIDs
 // so filterOwnedSessions continues to recognise the session.
 func (s *Session) SetAgentSessionID(id, agentType string) {
+	s.updateAgentSessionID(id, agentType)
+}
+
+// 同时比较 ID 和类型，修复旧的错误类型标签；只改类型时保留原生 ID、历史 ID 和 fork 状态。
+// 返回是否发生变化，供调用方决定是否持久化。
+func (s *Session) updateAgentSessionID(id, agentType string) bool {
 	if id == ContinueSession {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.AgentSessionID == id && s.AgentType == agentType {
+		return false
+	}
 	if s.AgentSessionID != id {
 		s.recordPastAgentSessionID()
 		s.ForkPending = false
 	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
+	return true
 }
 
 // CompareAndSetAgentSessionID sets the agent session ID only if it is currently

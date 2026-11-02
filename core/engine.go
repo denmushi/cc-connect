@@ -4582,8 +4582,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// context. Session naming binds only on first assignment to avoid
 		// polluting sessionNames with every forked ID.
 		wasEmpty := session.GetAgentSessionID() == ""
-		if session.GetAgentSessionID() != newID {
-			session.SetAgentSessionID(newID, agent.Name())
+		if session.updateAgentSessionID(newID, agent.Name()) {
 			if wasEmpty {
 				pendingName := session.GetName()
 				if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6105,8 +6104,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if event.SessionID != "" {
 				wasEmpty := session.GetAgentSessionID() == ""
-				if session.GetAgentSessionID() != event.SessionID {
-					session.SetAgentSessionID(event.SessionID, e.agent.Name())
+				// 按当前群实际选择的 Agent 保存，不能使用 bot 的默认 Agent。
+				if session.updateAgentSessionID(event.SessionID, replyAgent.Name()) {
 					if wasEmpty {
 						pendingName := session.GetName()
 						if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6242,8 +6241,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if state != nil && state.agentSession != nil {
 				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
 					wasEmpty := session.GetAgentSessionID() == ""
-					if session.GetAgentSessionID() != currentID {
-						session.SetAgentSessionID(currentID, e.agent.Name())
+					if session.updateAgentSessionID(currentID, replyAgent.Name()) {
 						if wasEmpty {
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6828,8 +6826,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// that ID here as well as from event.SessionID so the retry reuses the
 			// conversation that already contains the user's original prompt.
 			if state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" && session.GetAgentSessionID() != currentID {
-					session.SetAgentSessionID(currentID, e.agent.Name())
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" && session.updateAgentSessionID(currentID, replyAgent.Name()) {
 					sessions.Save()
 				}
 			}
