@@ -88,7 +88,7 @@ func executeSetup(args []string, in io.Reader, out, errOut io.Writer) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	for _, name := range []string{"feishu-collab-setup.py", "collab_config.py"} {
+	for _, name := range []string{"feishu-collab-setup.py", "collab_config.py", "agent_runtime.py"} {
 		data, err := ccconnect.SetupAssets.ReadFile("tools/" + name)
 		if err != nil {
 			return err
@@ -111,7 +111,7 @@ func executeSetup(args []string, in io.Reader, out, errOut io.Writer) error {
 func runSetup(args []string) {
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
-			fmt.Println("用法：cc-connect setup [--add-bot] [--home 目录] [--agents codex,cc] [--codex-dir 目录] [--cc-dir 目录] [--no-service]\n\n安装二进制后继续运行此向导，逐项选择 Agent、确认工作目录、配置机器人并启动服务。\n默认目录会显示在问题中，可回车接受或输入自定义路径；setup --add-bot 复用已确认的 Agent 配置。\n需要已有的 Python 3.11+ Conda 环境；不需要源码或 Go 编译器。")
+			fmt.Println("用法：cc-connect setup [--add-bot] [--home 目录] [--agents codex,cc] [--codex-dir 目录] [--cc-dir 目录] [--no-service]\n\n安装二进制后继续运行此向导，逐项选择 Agent、确认工作目录、选择独立 CLI / 桌面版内置 CLI / 自定义程序路径、配置机器人并启动服务。\n默认目录会显示在问题中，可回车接受或输入自定义路径；setup --add-bot 复用已确认的 Agent 配置。\n需要已有的 Python 3.11+ Conda 环境；不需要源码或 Go 编译器。")
 			return
 		}
 	}

@@ -13,7 +13,7 @@ func TestSetupCommandAndEmbeddedResources(t *testing.T) {
 	if topLevelCommandHandlers["setup"] == nil {
 		t.Fatal("setup is not available after binary installation")
 	}
-	for _, name := range []string{"feishu-collab-setup.py", "collab_config.py"} {
+	for _, name := range []string{"feishu-collab-setup.py", "collab_config.py", "agent_runtime.py"} {
 		data, err := ccconnect.SetupAssets.ReadFile("tools/" + name)
 		if err != nil || len(data) == 0 {
 			t.Fatalf("missing embedded setup resource %s: %v", name, err)

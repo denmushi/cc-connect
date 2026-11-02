@@ -522,19 +522,26 @@ func TestSnapshotCLIPath(t *testing.T) {
 		name      string
 		cmd       string
 		extraArgs []string
-		want      string
+		want      []string
 	}{
-		{"default-claude-skipped", "claude", nil, ""},
-		{"empty-binary-skipped", "", nil, ""},
-		{"custom-binary-only", "/usr/local/bin/claude", nil, "/usr/local/bin/claude"},
-		{"wrapper-with-args", "my-cli", []string{"code", "-t", "foo"}, "my-cli code -t foo"},
-		{"claude-with-add-dir", "claude", []string{"--add-dir", "/parent"}, "claude --add-dir /parent"},
+		{"default-claude-skipped", "claude", nil, nil},
+		{"empty-binary-skipped", "", nil, nil},
+		{"custom-binary-only", "/usr/local/bin/claude", nil, []string{"/usr/local/bin/claude"}},
+		{"wrapper-with-args", "my-cli", []string{"code", "-t", "foo"}, []string{"my-cli", "code", "-t", "foo"}},
+		{"claude-with-add-dir", "claude", []string{"--add-dir", "/parent"}, []string{"claude", "--add-dir", "/parent"}},
+		{"desktop-path-with-spaces", "/Library/Application Support/Claude/claude", []string{"--add-dir", "/my project"}, []string{"/Library/Application Support/Claude/claude", "--add-dir", "/my project"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := snapshotCmdPath(tc.cmd, tc.extraArgs)
-			if got != tc.want {
-				t.Errorf("snapshotCmdPath(%q, %v) = %q, want %q", tc.cmd, tc.extraArgs, got, tc.want)
+			got := snapshotCmdArgs(tc.cmd, tc.extraArgs)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("snapshotCmdArgs(%q, %v) = %q, want %q", tc.cmd, tc.extraArgs, got, tc.want)
+			}
+			if len(got) > 0 {
+				bin, args := core.ParseCmdOpts(map[string]any{"cmd": got}, "claude")
+				if bin != tc.cmd || !reflect.DeepEqual(args, got[1:]) {
+					t.Fatalf("snapshot changed argv boundaries: %q %q", bin, args)
+				}
 			}
 		})
 	}
@@ -561,7 +568,7 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 
 	want := map[string]any{
 		"mode":               "acceptEdits",
-		"cmd":                "my-cli --add-dir /parent",
+		"cmd":                []string{"my-cli", "--add-dir", "/parent"},
 		"cmd_args_flag":      "-a",
 		"model":              "claude-opus-4-7",
 		"reasoning_effort":   "high",
@@ -588,7 +595,7 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 
 func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
 	// Default agent (only mode is always emitted, plus default cmd
-	// "claude" should be skipped by snapshotCmdPath).
+	// "claude" should be skipped by snapshotCmdArgs).
 	a := &Agent{cmd: "claude", mode: "default"}
 	got := a.WorkspaceAgentOptions()
 

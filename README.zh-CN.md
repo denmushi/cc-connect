@@ -55,7 +55,7 @@ go build -tags no_web -o cc-connect ./cmd/cc-connect
 
 **安装二进制后必须继续运行 `cc-connect setup` 完成配置。** 不要停在版本检查或“机器人尚未配置”；如果让 AI 帮忙安装，应让它逐项向你提问并继续向导，具体步骤见 [INSTALL.md](INSTALL.md)。
 
-安装向导明确询问 Agent 类型（可多选）和各自目录，显示默认路径，允许用户自定义。机器人凭证存到 bot 列表中；之后加 bot 只运行 `cc-connect setup --add-bot`，复用同一组 Agent 和同一个服务，不需要新建项目。进入群后只有两个命令：
+安装向导明确询问 Agent 类型（可多选）、各自目录和程序来源（独立 CLI / 桌面版内置 CLI / 自定义路径），显示默认目录以及选中程序的路径、版本。登录检查和运行均使用选中的程序，不自动切换来源。机器人凭证存到 bot 列表中；之后加 bot 只运行 `cc-connect setup --add-bot`，复用同一组 Agent 和同一个服务，不需要新建项目。进入群后只有两个命令：
 
 - `@你的机器人 /codex-create`：在配置的 Codex 工作目录新建会话并绑定本群。
 - `@你的机器人 /cc-create`：在配置的 Claude Code 工作目录新建会话并绑定本群。

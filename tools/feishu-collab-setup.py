@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,8 @@ from pathlib import Path
 
 from collab_config import (configure_agents, default_config, migrate_pool, read_config,
                            upsert_bot, write_config as write_pool_config)
+from agent_runtime import (SOURCE_LABELS, configured_argv, discover_executables,
+                           executable_source, resolve_executable)
 
 REPO = Path(__file__).resolve().parent.parent
 OPEN_API = "https://open.feishu.cn"
@@ -125,38 +128,104 @@ def toml_str(s):
 
 
 
-def agent_command(kind):
-    if kind == "claudecode":
-        return shutil.which("claude")
-    found = shutil.which("codex")
-    if found:
-        return found
-    for app in ("ChatGPT.app", "Codex.app"):
-        for rel in ("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"):
-            path = Path("/Applications") / app / rel
-            if path.is_file() and os.access(str(path), os.X_OK):
-                return str(path)
-    return None
-
-
 def check_tools(require_go=True):
     if require_go and not shutil.which("go"):
         fail("请先安装 Go 1.25 或更新版本")
-    if not any(agent_command(kind) for kind in ("codex", "claudecode")):
-        fail("请先安装并登录 Codex 或 Claude Code，至少需要一种")
+
+
+def select_agent_runtime(agent):
+    kind = agent["type"]
+    label = "Codex" if kind == "codex" else "Claude Code"
+    options = agent.setdefault("options", {})
+    previous = configured_argv(options)
+    previous_source = options.get("cli_source")
+    choices = {"1": "cli", "2": "desktop", "3": "custom"}
+    default = next((key for key, value in choices.items() if value == previous_source), "")
+    say("\n%s 运行来源（独立安装与桌面内置可能有不同版本和启动环境）：" % label)
+    say("使用桌面版内置 CLI 不等于接管桌面聊天，也不保证会话自动出现在桌面侧栏。")
+    while True:
+        candidates = discover_executables(kind)
+        for key, source in choices.items():
+            paths = candidates.get(source, [])
+            say("  %s. %s%s" % (key, SOURCE_LABELS[source],
+                "：" + "；".join(paths) if paths else "（输入程序文件路径）" if source == "custom" else "（未检测到）"))
+        answer = ask("%s 选择运行来源：1/2/3；取消输入 q" % label, default).lower()
+        if answer == "q":
+            fail("运行来源尚未确认，配置未完成")
+        if answer not in choices:
+            say("请明确选择一种来源")
+            continue
+        source = choices[answer]
+        paths = candidates.get(source, [])
+        if source == "custom" or not paths:
+            if not paths and source != "custom":
+                say("未检测到%s。可以先安装，再回车重新检测；也可输入该来源的程序路径。" % SOURCE_LABELS[source])
+            raw = ask("程序文件路径（不要附加参数；留空返回来源选择）",
+                      previous[0] if source == "custom" and previous_source == source and previous else "")
+            if not raw:
+                continue
+        elif len(paths) == 1:
+            raw = paths[0]
+        else:
+            for index, path in enumerate(paths, 1):
+                say("  %d. %s" % (index, path))
+            path_default = str(paths.index(previous[0]) + 1) if previous and previous[0] in paths else "1"
+            selected = ask("检测到多个程序，选择路径序号", path_default)
+            if not selected.isdigit() or not 1 <= int(selected) <= len(paths):
+                say("请输入有效的路径序号")
+                continue
+            raw = paths[int(selected) - 1]
+        try:
+            binary = resolve_executable(raw)
+            if source != "custom" and executable_source(binary) != source:
+                raise ValueError("该路径属于%s，请重新选择来源" % SOURCE_LABELS[executable_source(binary)])
+            result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                raise ValueError("选中的程序未通过 --version 检查")
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            warn(str(error))
+            continue
+        # 只替换程序入口，保留用户原有参数；数组避免 Application Support 被拆开。
+        options["cmd"] = [binary] + previous[1:]
+        options["cli_source"] = source
+        say("✅ %s：%s\n   路径：%s\n   版本：%s" %
+            (label, SOURCE_LABELS[source], binary, (result.stdout or result.stderr).strip().splitlines()[0]
+             if (result.stdout or result.stderr).strip() else "未提供版本文本"))
+        say("程序路径失效时将提示重新配置，不会自动切换到另一种来源。")
+        return
+
+
+def configure_agent_runtimes(agents, reuse=False):
+    for agent in agents:
+        options = agent.get("options", {})
+        argv = configured_argv(options)
+        if reuse and options.get("cli_source") in SOURCE_LABELS and argv and Path(argv[0]).is_absolute():
+            say("复用 %s 的%s：%s" % (agent["type"], SOURCE_LABELS[options["cli_source"]], argv[0]))
+            continue
+        select_agent_runtime(agent)
 
 
 def check_agent_login(agents):
     for agent in agents:
         kind = agent["type"]
-        binary = agent_command(kind)
-        if not binary:
-            fail("未找到 %s 命令，请安装后重新运行 cc-connect setup" % kind)
+        options = agent.get("options", {})
+        argv = configured_argv(options)
+        try:
+            if not argv or not Path(argv[0]).is_absolute():
+                raise ValueError("尚未确认运行程序的绝对路径")
+            binary = resolve_executable(argv[0])
+            if binary != argv[0]:
+                raise ValueError("已选程序路径指向发生变化，请重新确认")
+        except (OSError, ValueError, RuntimeError) as error:
+            fail("%s 已选运行程序不可用：%s。请重新运行 cc-connect setup；不会自动切换来源。" % (kind, error))
         status_args = ["auth", "status"] if kind == "claudecode" else ["login", "status"]
-        login_command = "claude auth login" if kind == "claudecode" else "codex login"
+        login_command = shlex.join([binary] + (["auth", "login"] if kind == "claudecode" else ["login"]))
+        env = os.environ.copy()
+        env.update({key: os.path.expandvars(str(value)) for key, value in options.get("env", {}).items()})
         while True:
             try:
-                result = subprocess.run([binary] + status_args, capture_output=True, text=True, timeout=20)
+                result = subprocess.run(argv + status_args, capture_output=True, text=True, timeout=20,
+                                        cwd=options.get("work_dir"), env=env)
                 logged_in = result.returncode == 0
                 if kind == "claudecode":
                     logged_in = logged_in and json.loads(result.stdout).get("loggedIn") is True
@@ -177,17 +246,17 @@ def check_agent_login(agents):
 def pick_agents(given, home, codex_dir=None, cc_dir=None, current=None):
     current = current or {}
     aliases = {"codex": "codex", "cc": "claudecode", "claudecode": "claudecode"}
-    available = [k for k in ("codex", "cc") if agent_command(aliases[k])]
+    available = [k for k in ("codex", "cc") if any(discover_executables(aliases[k]).values())]
     while True:
         explicit = given is not None
         raw = given or ask("配置哪些 Agent？填 codex、cc，或 codex,cc", ",".join(available))
         given = None
         keys = list(dict.fromkeys(x.strip().lower() for x in raw.split(",") if x.strip()))
-        if keys and all(k in aliases and agent_command(aliases[k]) for k in keys):
+        if keys and all(k in aliases for k in keys):
             break
         if explicit:
-            fail("--agents 只能选择已安装的 codex、cc 或 codex,cc")
-        say("请选择已经安装的 Agent：codex、cc，支持多选")
+            fail("--agents 只能选择 codex、cc 或 codex,cc")
+        say("请选择 Agent：codex、cc，支持多选；下一步指定已安装的程序")
     profiles = {}
     for key in keys:
         kind = aliases[key]
@@ -404,10 +473,12 @@ def prepare_agents(data, args, home):
     if args.add_bot and current and not args.reconfigure_agents:
         for kind, directory in current.items():
             say("复用 %s 会话工作目录：%s" % (kind, directory))
+        configure_agent_runtimes(data["agents"], reuse=True)
         return
     # 正常安装/重新配置始终询问目录，已有配置也不能静默跳过。
     profiles = pick_agents(args.agents, home, args.codex_dir, args.cc_dir or args.work_dir, current)
     configure_agents(data, profiles)
+    configure_agent_runtimes(data["agents"])
 
 
 def main():
@@ -443,7 +514,7 @@ def main():
         say("旧程序需要升级一次以支持机器人池；之后添加 bot 会复用已安装的程序")
         skip_build = False
 
-    step(1, "选择 Agent 和会话目录")
+    step(1, "选择 Agent、会话目录和运行来源")
     check_tools(require_go=not skip_build)
     prepare_agents(data, args, home)
     check_agent_login(data["agents"])

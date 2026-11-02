@@ -18,9 +18,12 @@ cc-connect setup
 
 1. 选择 `codex`、`cc` 或 `codex,cc`。
 2. 分别询问 Codex 和 Claude Code 的会话工作目录，展示默认路径；回车接受，或输入自定义路径。目录不存在时会创建。已有配置也会再次询问，不会静默跳过。
-3. 扫码新建飞书机器人，或输入已有机器人的 App ID 和 App Secret。
-4. 检查权限和名字，保存到机器人列表。配置期间不需要预先加入群。
-5. 询问启动方式。选择后台服务后，验证新的启动日志；未启动或启动未确认时明确标记，不报告安装配置完成。
+3. 为每个 Agent 选择程序来源：独立 CLI、桌面版内置 CLI 或自定义程序路径。展示检测到的实际路径；多个程序可选择具体路径。选择后验证版本和登录状态。即使只有一种来源可用也必须确认；未检测到程序时可先安装，或指定路径，不自动替换来源。
+4. 扫码新建飞书机器人，或输入已有机器人的 App ID 和 App Secret。
+5. 检查权限和名字，保存到机器人列表。配置期间不需要预先加入群。
+6. 询问启动方式。选择后台服务后，验证新的启动日志；未启动或启动未确认时明确标记，不报告安装配置完成。
+
+程序来源与会话工作目录分别配置。macOS 会检测独立 CLI 和桌面内置程序（包括指向桌面程序的 PATH 软链接），其他位置可选择自定义路径。选定的实际绝对路径和来源会保存到配置；路径失效后需重新运行 `cc-connect setup` 确认，不会自动使用其他安装。两种来源可能有不同版本和启动环境；选择桌面内置 CLI 不代表桌面会话接管，也不保证桌面侧栏自动显示。
 
 首次配置时会显示：
 
@@ -40,7 +43,7 @@ Claude Code 会话工作目录（回车使用默认，或输入自定义路径�
 cc-connect setup --add-bot
 ```
 
-只添加新机器人的 App ID / App Secret（也可以扫码新建），复用已经确认的 Agent 类型、目录及同一个后台服务。正常情况下不再编译、不要求新目录、不复制项目；保存后重启现有服务即可生效。旧版程序首次升级到机器人池时需要编译一次。
+只添加新机器人的 App ID / App Secret（也可以扫码新建），复用已经确认的 Agent 类型、程序来源、目录及同一个后台服务。正常情况下不再编译、不要求新目录、不复制项目；保存后重启现有服务即可生效。旧配置没有确认过程序来源时会补问一次。旧版程序首次升级到机器人池时需要编译一次。
 
 把机器人拉入群后，由主人发送 `/codex-create` 或 `/cc-create`。如需主动限制可响应的群，可以在向导中加 `--choose-chats`；更新已有 bot 时会保留其现有群范围。
 
@@ -72,7 +75,7 @@ cc-connect setup --add-bot
 
 新建时会给原生会话设置「群名 · 机器人名 · Agent」标题。Codex 的 `app_server` 后端按会话目录匹配原生项目（优先最具体的目录），没有匹配项时通过原生接口创建项目；恢复旧会话时补齐缺失的项目关联和标题，保留用户已有的原生归属、标题。旧版 Codex 不支持项目接口时仍可聊天，但会明确提示同步未完成。
 
-部分 Codex Desktop 版本缓存侧栏的项目归属，外部会话写入原生项目后不会立即刷新。通过下面的 `desktop open` 打开一次会话后，桌面端会加载原生项目归属；不需要编辑桌面私有状态文件。
+部分 Codex Desktop 版本尚未同步外部会话的侧栏项目归属。写入原生项目或调用 `desktop open` 不代表侧栏归属已完成；需要单独核对桌面列表，不能把底层元数据写入成功报告成桌面自动归属成功。
 
 Claude Code 会话保存在对应工作目录的原生记录中，可以用 `claude --resume` 查找。Claude Desktop 与 CLI 的列表分开；桌面接管需要支持 `--desktop` 的 Claude Code（本次验证版本为 2.1.300）及 Claude 订阅登录。
 
@@ -102,6 +105,8 @@ type = "codex"
 work_dir = "/path/chosen/by/user/codex"
 backend = "app_server"
 mode = "suggest"
+cli_source = "cli"
+cmd = ["/path/to/standalone/codex"]
 
 [[agents]]
 type = "claudecode"
@@ -109,7 +114,8 @@ type = "claudecode"
 work_dir = "/path/chosen/by/user/claude"
 mode = "dontAsk"
 disallowed_tools = ["Bash", "Edit", "Write", "NotebookEdit"]
-cmd = "claude --strict-mcp-config"
+cli_source = "desktop"
+cmd = ["/path/to/desktop/bundled/claude", "--strict-mcp-config"]
 
 [[bots]]
 name = "我的机器人 A"

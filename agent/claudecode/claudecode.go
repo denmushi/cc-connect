@@ -941,8 +941,8 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		}
 		opts["env"] = envMap
 	}
-	if cliPath := snapshotCmdPath(a.cmd, a.cliExtraArgs); cliPath != "" {
-		opts["cmd"] = cliPath
+	if command := snapshotCmdArgs(a.cmd, a.cliExtraArgs); len(command) > 0 {
+		opts["cmd"] = command
 	}
 	if a.cmdArgsFlag != "" {
 		opts["cmd_args_flag"] = a.cmdArgsFlag
@@ -977,22 +977,16 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	return opts
 }
 
-// snapshotCmdPath rebuilds the cmd opts string from cmd and the
-// extra-args tail captured at construction. Returns "" when only the
-// default "claude" binary is in use, so we don't pollute the workspace
-// opts with a redundant default.
-func snapshotCmdPath(cmd string, cliExtraArgs []string) string {
+// 使用参数数组保留用户选定的程序路径；桌面内置 CLI 的路径常含空格，不能拼回字符串。
+func snapshotCmdArgs(cmd string, cliExtraArgs []string) []string {
 	// Normalise empty to the default binary so we can reason about extra args.
 	if cmd == "" {
 		cmd = "claude"
 	}
 	if cmd == "claude" && len(cliExtraArgs) == 0 {
-		return "" // default binary, no extra args — no need to persist
+		return nil // default binary, no extra args — no need to persist
 	}
-	if len(cliExtraArgs) == 0 {
-		return cmd
-	}
-	return cmd + " " + strings.Join(cliExtraArgs, " ")
+	return append([]string{cmd}, cliExtraArgs...)
 }
 
 // stringsToAny copies a []string into a fresh []any so it round-trips
